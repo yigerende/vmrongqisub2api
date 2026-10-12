@@ -11,6 +11,9 @@ export const DEFAULT_QUALITY_CONFIG = {
   timeout_seconds: 180,
   history_limit: 200,
   default_enabled: false,
+  pause_on_degraded: false,
+  failure_limit: 2,
+  recovery_limit: 1,
   questions: [
     {
       id: 'candy',
@@ -53,12 +56,15 @@ export function validateQualityConfig(input) {
   if (!['low', 'medium', 'high', 'xhigh'].includes(q.reasoning_effort)) throw new Error('推理强度无效')
   if (!['content', 'time', 'content_time'].includes(q.mode)) throw new Error('判断方式无效')
   if (typeof q.default_enabled !== 'boolean') throw new Error('新增账号开关无效')
+  if (typeof q.pause_on_degraded !== 'boolean') throw new Error('降智暂停调度开关无效')
   for (const [key, min, max] of [
     ['interval_seconds', 10, 86400],
     ['retry_seconds', 10, 86400],
     ['concurrency', 1, 32],
     ['timeout_seconds', 5, 300],
     ['history_limit', 1, 1000],
+    ['failure_limit', 1, 1000],
+    ['recovery_limit', 1, 1000],
   ]) {
     if (!Number.isInteger(q[key]) || q[key] < min || q[key] > max) throw new Error(`${key} 必须为 ${min}–${max} 的整数`)
   }

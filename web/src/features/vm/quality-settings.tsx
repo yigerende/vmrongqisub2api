@@ -213,6 +213,45 @@ function QualityForm({
           新增账号默认开启检测
         </label>
       </div>
+      <div className='space-y-3 rounded-lg border p-3'>
+        <label className='flex items-center gap-2 text-sm font-medium'>
+          <Switch
+            checked={value.pause_on_degraded}
+            aria-label='降智后暂停调度'
+            onCheckedChange={(next) => set('pause_on_degraded', next)}
+          />
+          降智后暂停调度
+        </label>
+        <div className='grid gap-3 sm:grid-cols-2'>
+          {(
+            [
+              ['failure_limit', '连续降智次数'],
+              ['recovery_limit', '连续恢复次数'],
+            ] as const
+          ).map(([key, label]) => (
+            <label key={key} className='space-y-1 text-xs'>
+              {label}
+              <Input
+                type='number'
+                value={value[key]}
+                min={1}
+                max={1000}
+                step={1}
+                required
+                disabled={!value.pause_on_degraded}
+                onChange={(e) => set(key, Number(e.target.value))}
+              />
+            </label>
+          ))}
+        </div>
+        <p className='text-xs text-muted-foreground'>
+          连续红色达到次数后暂停调度，连续绿色达到次数后恢复。黄色请求失败不计数，也不中断连续次数；手动检测同样计数。
+          仅恢复由降智检测暂停的账号，手动暂停不会自动开启。暂停期间自动检测继续运行。
+        </p>
+        <p className='text-xs text-muted-foreground'>
+          修改检测配置或手动切换调度后重新计数。关闭此选项不会自动开启已暂停账号，可手动开启调度。
+        </p>
+      </div>
       <div className='space-y-3'>
         <div className='flex items-center justify-between'>
           <h3 className='text-sm font-medium'>检测题库</h3>
@@ -328,7 +367,7 @@ function QualityForm({
       </div>
       <p className='text-xs text-muted-foreground'>
         标准答案支持纯答案或单行
-        FINAL_ANSWER=答案。检测结果只作记录，不触发自动停用、删除或重建。
+        FINAL_ANSWER=答案。开启“降智后暂停调度”才会按连续次数调整调度开关。
       </p>
       <DialogFooter>
         <Button type='submit' disabled={save.isPending}>

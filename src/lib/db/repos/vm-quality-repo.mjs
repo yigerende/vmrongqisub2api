@@ -37,7 +37,17 @@ export class VmQualityRepo {
   }
 
   reschedule() {
-    this.db.prepare('UPDATE vm_quality_state SET next_at = 0, question_cursor = 0').run()
+    this.db
+      .prepare('UPDATE vm_quality_state SET next_at = 0, question_cursor = 0, failure_streak = 0, recovery_streak = 0')
+      .run()
+  }
+
+  streaks(id, failures, recoveries, version) {
+    this.db
+      .prepare(
+        'UPDATE vm_quality_state SET failure_streak = ?, recovery_streak = ?, schedule_version = ? WHERE vm_id = ?',
+      )
+      .run(failures, recoveries, version, id)
   }
 
   history(id, limit = 16) {

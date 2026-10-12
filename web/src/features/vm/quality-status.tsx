@@ -109,6 +109,11 @@ export function VmQualityStatus({ vm }: { vm: Vm }) {
           <History className='size-3' />
         </Button>
       </div>
+      {snapshot?.paused_by_quality && (
+        <p className='text-[10px] text-amber-600 dark:text-amber-400'>
+          降智暂停 · 连续恢复 {snapshot.recovery_streak} 次
+        </p>
+      )}
       {enabled || rows.length > 0 || running ? (
         <div
           className='flex items-center gap-1'

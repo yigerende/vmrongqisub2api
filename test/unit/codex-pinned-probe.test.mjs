@@ -5,7 +5,8 @@ import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { handleCodexProtocol, pickCodexCandidates } from '../../src/lib/protocol/handle-codex.mjs'
-import { getVm } from '../../src/lib/vm/vm-registry.mjs'
+import { getVm, listVms } from '../../src/lib/vm/vm-registry.mjs'
+import { changeVmQualitySchedule } from '../../src/lib/admin/vm-quality-schedule.mjs'
 import { runVmQualityProbe } from '../../src/lib/admin/vm-quality-probe.mjs'
 import { DEFAULT_QUALITY_CONFIG, evaluateQuality } from '../../src/lib/admin/vm-quality-config.mjs'
 
@@ -158,6 +159,19 @@ test('stopped and unauthorised pinned containers stay unavailable and report the
   assert.deepEqual(seen.config, [])
   assert.deepEqual(seen.ensure, [])
   assert.deepEqual(seen.hop, [])
+})
+
+test('quality-paused Docker slot continues real pinned recovery probes without enabling normal scheduling', async (t) => {
+  const root = fixture(t)
+  seed(root, targetId)
+  changeVmQualitySchedule(root, listVms(root)[0], false)
+  assert.deepEqual(pick(root).ids, [])
+  const before = getVm(root, targetId)
+  const { baseUrl, seen } = await gateway(t, root)
+  const result = await probe(root, baseUrl)
+  assert.equal(result.ok, true, result.error?.message)
+  assert.deepEqual(seen.hop, [targetId])
+  assert.deepEqual(getVm(root, targetId), before)
 })
 
 test('failed pinned probes never substitute another account and remain yellow', async (t) => {

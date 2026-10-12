@@ -5,6 +5,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { atomicWriteJson, listVmRecordFiles } from './vm-file.mjs'
 import {
   hasAccessPresence,
@@ -139,6 +140,9 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     schedulable: vm.schedulable !== false,
     schedule_manual: vm.schedule_manual === true,
     schedule_disabled_reason: vm.schedule_disabled_reason || null,
+    schedule_quality_identity: vm.schedule_quality_identity || null,
+    schedule_revision: vm.schedule_revision || null,
+    schedule_updated_at: vm.schedule_updated_at || null,
     temp_unschedulable_until: vm.claude?.temp_unschedulable_until || vm.temp_unschedulable_until || null,
     temp_unschedulable_reason: vm.claude?.temp_unschedulable_reason || vm.temp_unschedulable_reason || null,
     owner_user_id: normalizeOwnerId(vm.owner_user_id),
@@ -443,9 +447,13 @@ export function setVmSchedulable(
   if (!fs.existsSync(file)) return null
   const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
   const src = source === 'manual' || source === 'force' ? source : 'auto'
+  if (src === 'auto' && schedulable && vm.schedulable === false && vm.schedule_disabled_reason === 'quality_degraded')
+    return summarizeVm(vm)
   if (src === 'auto' && isManualScheduleLocked(vm)) return summarizeVm(vm)
   if (src === 'manual') vm.schedule_manual = true
   vm.schedulable = !!schedulable
+  vm.schedule_quality_identity = null
+  vm.schedule_revision = crypto.randomUUID()
   vm.schedule_updated_at = new Date().toISOString()
   vm.updated_at = vm.schedule_updated_at
   if (schedulable) {

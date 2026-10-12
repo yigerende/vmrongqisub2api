@@ -19,6 +19,9 @@ export type QualityConfig = {
   timeout_seconds: number
   history_limit: number
   default_enabled: boolean
+  pause_on_degraded: boolean
+  failure_limit: number
+  recovery_limit: number
   questions: QualityQuestion[]
 }
 
@@ -40,5 +43,8 @@ export type QualitySnapshot = {
   enabled: boolean
   running: boolean
   next_at: number | null
+  failure_streak: number
+  recovery_streak: number
+  paused_by_quality: boolean
   history: QualityResult[]
 }

@@ -10,6 +10,7 @@ import {
   clearActiveVm,
   getActiveVmId,
   bindVmProxy,
+  setVmSchedulable,
 } from '../vm/vm-registry.mjs'
 import { removeVmFromDb, clearActiveVmFromDb } from '../vm/vm-db-sync.mjs'
 import { OS_CATALOG } from '../vm/os-catalog.mjs'
@@ -264,17 +265,15 @@ export async function handleManagedCodex({ req, res, url, cfg, routing, proxyPoo
       if (typeof body.schedulable !== 'boolean')
         throw containerError('invalid_schedule', 'schedulable 必须为布尔值', 400)
       // Persist suspension before draining, including when a request outlives the drain timeout.
-      if (!body.schedulable)
-        patchVmRecord(root, id, { schedulable: false, schedule_manual: true, schedule_disabled_reason: 'manual' })
+      if (!body.schedulable) setVmSchedulable(root, id, false, 'manual', { preserveStatus: true, source: 'manual' })
       await withManagedMaintenance(root, vm, async (current) => {
         if (body.schedulable) {
           await ensureManagedKernel(managedExec(root, current), { internal: true })
           if (current.pool_id) vmPoolsFor(getDb()).addMember(current.pool_id, id)
         }
-        patchVmRecord(root, id, {
-          schedulable: body.schedulable,
-          schedule_manual: true,
-          schedule_disabled_reason: body.schedulable ? null : 'manual',
+        setVmSchedulable(root, id, body.schedulable, body.schedulable ? null : 'manual', {
+          preserveStatus: true,
+          source: 'manual',
         })
       })
       return json(res, 200, { ok: true, data: { id, schedulable: body.schedulable, in_flight: 0 } })

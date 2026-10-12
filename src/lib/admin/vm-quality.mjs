@@ -3,32 +3,19 @@ import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { VmQualityRepo } from '../db/repos/vm-quality-repo.mjs'
 import { withTransaction } from '../db/database.mjs'
 import { DEFAULT_QUALITY_CONFIG, evaluateQuality, validateQualityConfig } from './vm-quality-config.mjs'
+import { qualityIdentity, qualityOwnsPause, qualityScheduleVersion } from './vm-quality-identity.mjs'
+
+export { qualityIdentity } from './vm-quality-identity.mjs'
 
 const CONFIG_KEY = 'vm_quality_config'
 const REVISION_KEY = 'vm_quality_revision'
-
-// Token refresh and proxy changes do not change account identity. Reset/replacement does.
-export function qualityIdentity(vm) {
-  return crypto
-    .createHash('sha256')
-    .update(
-      JSON.stringify([
-        vm.created_at,
-        vm.assignment_id,
-        vm.fingerprint?.guest_machine_id,
-        vm.org_uuid,
-        vm.account_uuid,
-        vm.email,
-      ]),
-    )
-    .digest('hex')
-}
 
 export function createVmQualityMonitor({
   db,
   listTargets,
   getTarget,
   runProbe,
+  changeSchedule,
   now = Date.now,
   onError = console.error,
 }) {
@@ -43,7 +30,14 @@ export function createVmQualityMonitor({
   let active = 0
   const tasks = new Set()
   const current = getTarget || ((id) => listTargets().find((v) => v.id === id))
-  const stateFor = (vm) => repo.ensure(vm.id, qualityIdentity(vm), config.default_enabled)
+  const stateFor = (vm) => {
+    const state = repo.ensure(vm.id, qualityIdentity(vm), config.default_enabled)
+    const version = qualityScheduleVersion(vm)
+    if (state.schedule_version === version) return state
+    // A manual toggle or another scheduling writer starts a fresh streak.
+    repo.streaks(vm.id, 0, 0, version)
+    return repo.get(vm.id)
+  }
 
   function snapshot(vm, limit = 16, full = false) {
     const state = stateFor(vm)
@@ -52,6 +46,9 @@ export function createVmQualityMonitor({
       enabled: !!state.enabled,
       running: !!job && job.identity === state.identity,
       next_at: state.next_at || null,
+      failure_streak: state.failure_streak,
+      recovery_streak: state.recovery_streak,
+      paused_by_quality: qualityOwnsPause(vm, state.identity),
       // Polling the fleet must not transfer every long model answer. Details are on demand.
       history: repo.history(vm.id, limit).map((result) => {
         if (full) return result
@@ -101,6 +98,7 @@ export function createVmQualityMonitor({
       if (job.source === 'auto' && (!state.enabled || vm.status !== 'running' || !vm.has_token)) return
       const q = structuredClone(config)
       const runRevision = revision
+      const runScheduleVersion = qualityScheduleVersion(vm)
       const questions = q.questions.filter((item) => item.enabled)
       const question = questions[state.question_cursor % questions.length]
       const startedAt = now()
@@ -129,7 +127,7 @@ export function createVmQualityMonitor({
         max_duration_ms: question.max_duration_ms,
       }
       const interval = verdict.status === 'normal' ? q.interval_seconds : q.retry_seconds
-      repo.record(
+      const recorded = repo.record(
         job.id,
         job.identity,
         result,
@@ -137,6 +135,17 @@ export function createVmQualityMonitor({
         verdict.status === 'error' ? state.question_cursor : state.question_cursor + 1,
         config.history_limit,
       )
+      const latestState = stateFor(latest)
+      // Keep stale samples for history only. An operator edit wins over an in-flight probe.
+      if (
+        recorded &&
+        runRevision === revision &&
+        runScheduleVersion === qualityScheduleVersion(latest) &&
+        config.pause_on_degraded &&
+        (job.source === 'manual' || latestState.enabled)
+      ) {
+        applyScheduleResult(latest, latestState, verdict.status)
+      }
     } catch (error) {
       onError('[vm-quality]', error)
     } finally {
@@ -144,6 +153,19 @@ export function createVmQualityMonitor({
       if (pending.get(job.id) === job) pending.delete(job.id)
       drain()
     }
+  }
+
+  function applyScheduleResult(vm, state, status) {
+    if (status === 'error') return // Yellow does not increment or break either streak.
+    const failures = status === 'degraded' ? Math.min(state.failure_streak + 1, 1000) : 0
+    const recoveries = status === 'normal' ? Math.min(state.recovery_streak + 1, 1000) : 0
+    repo.streaks(vm.id, failures, recoveries, qualityScheduleVersion(vm))
+    if (!changeSchedule || vm.status !== 'running' || !vm.has_token) return
+    const pause = status === 'degraded' && failures >= config.failure_limit && vm.schedulable !== false
+    const resume = status === 'normal' && recoveries >= config.recovery_limit && qualityOwnsPause(vm, state.identity)
+    if (!pause && !resume) return
+    const changed = changeSchedule(vm, resume)
+    if (changed) repo.streaks(vm.id, failures, recoveries, qualityScheduleVersion(changed))
   }
 
   function drain() {

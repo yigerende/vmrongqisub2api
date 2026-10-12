@@ -98,6 +98,7 @@ import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
 import { handleUserCountTokens, handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
 import { createVmQualityMonitor } from './lib/admin/vm-quality.mjs'
+import { changeVmQualitySchedule } from './lib/admin/vm-quality-schedule.mjs'
 import { runVmQualityProbe } from './lib/admin/vm-quality-probe.mjs'
 
 const FEATURES = [
@@ -855,6 +856,7 @@ cliNodeGuard = createCliNodeGuard({
 
 const qualityMonitor = createVmQualityMonitor({
   db: getDb(),
+  changeSchedule: (vm, schedulable) => changeVmQualitySchedule(cfg.paths.project, vm, schedulable),
   listTargets: () => listVms(cfg.paths.project),
   getTarget: (id) => {
     const vm = getVm(cfg.paths.project, id)
