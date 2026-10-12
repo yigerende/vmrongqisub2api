@@ -17,6 +17,7 @@ const HARD_UNAVAILABLE = new Set(['dead', 'error', 'disabled'])
 
 export function isCodexSlotReady(vm) {
   if (!vm || !isCodexVm(vm)) return false
+  if (vm.execution_mode === 'docker_per_slot' && vm.status !== 'running') return false
   if (proxyBlockedReason(vm.proxy)) return false
   if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return false
   if (!vm.has_token) return false
@@ -85,6 +86,8 @@ export function pickCodexSlots(vms, { pin = null, now = Date.now(), quotaPolicy 
   if (pin) {
     const vm = list.find((item) => item?.id === pin) || null
     if (!vm || !isCodexVm(vm)) return { error: 'platform_mismatch', pin, ids: [], ready: [], parked: [] }
+    if (vm.execution_mode === 'docker_per_slot' && (vm.status !== 'running' || !vm.has_token))
+      return { error: 'slot_unavailable', pin, ids: [], ready: [], parked: [] }
     const blocked = proxyBlockedReason(vm.proxy)
     if (blocked) return { error: blocked, pin, ids: [], ready: [], parked: [] }
     return { ids: [vm.id], pin, ready: [vm.id], parked: [] }

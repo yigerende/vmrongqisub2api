@@ -68,6 +68,10 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
   const quotaGate = kind.kind === 'codex' ? evaluateCodexQuotaSchedule(vm, Date.now(), globalOpenAI) : null
   return {
     id: vm.id,
+    assignment_id: vm.assignment_id || null,
+    execution_mode: vm.execution_mode || null,
+    container_name: vm.container_name || null,
+    pool_id: vm.pool_id || null,
     name: vm.name,
     status: vm.status || 'unknown',
     kernel: vm.kernel || null,

@@ -353,7 +353,9 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   if (pack.error === 'upstream_auth' && rotate && current.refresh) {
     current = await rotateIfNeeded(current, projectRoot, vmId, fetchImpl)
     if (!current.access || current.rotateError) {
-      return fail(current.rotateError || 'refresh_failed', 'GPT OAuth 刷新失败，请重新导入', 502)
+      return fail(current.rotateError || 'refresh_failed', 'GPT OAuth 刷新失败，请重新导入', 502, {
+        upstream_status: pack.status,
+      })
     }
     pack = await run(current.access)
   }
@@ -395,7 +397,25 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   }
 }
 
-export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {
+export async function queryOpenaiQuota({
+  projectRoot,
+  vmId,
+  fetchImpl,
+  rotate = true,
+  policy = null,
+  managedLocked = false,
+} = {}) {
+  const vm = getVm(projectRoot, vmId)
+  if (vm?.execution_mode === 'docker_per_slot' && !managedLocked) {
+    const { withManagedMaintenance } = await import('../vm/codex-container.mjs')
+    try {
+      return await withManagedMaintenance(projectRoot, vm, () =>
+        queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate, policy, managedLocked: true }),
+      )
+    } catch (error) {
+      return fail(error.code || 'slot_busy', error.message, error.status || 503)
+    }
+  }
   const slot = await loadSlot(projectRoot, vmId)
   if (!slot.ok) return slot
   return queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy })

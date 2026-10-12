@@ -383,6 +383,7 @@ export function slotWorkerNeedsRecreate(existing, vm, paths) {
  * KVM restarts the guest kin-kernel unit; docker restart would reboot the VM.
  */
 export function reloadSlotWorker(vm, projectRoot, { routing } = {}) {
+  if (vm?.execution_mode === 'docker_per_slot') return { ok: false, error: 'managed_slot_use_panel_start' }
   if (!vm?.id) return { ok: false, error: 'vm required' }
   const paths = workerPaths(projectRoot, vm.id)
   const name = containerName(vm.id)
@@ -702,6 +703,7 @@ export function buildKvmRunArgs({
 }
 
 export function startVmRuntime(vm, projectRoot, { recreate = false, routing, accel: accelOpt } = {}) {
+  if (vm?.execution_mode === 'docker_per_slot') return { ok: false, error: 'managed_slot_use_panel_start' }
   if (isKvmRuntime(vm) && accelOpt !== 'kvm' && accelOpt !== 'tcg') {
     const recorded = vm.runtime?.accel
     if (recorded !== 'kvm' && recorded !== 'tcg') {
@@ -945,6 +947,7 @@ export function startVmRuntime(vm, projectRoot, { recreate = false, routing, acc
 
 /** Explicit factory reset / delete only. Never call from Node deploy. */
 export function destroyVmRuntime(vm) {
+  if (vm?.execution_mode === 'docker_per_slot') return { ok: false, error: 'managed_slot_use_panel_delete' }
   if (!vm?.id) return { ok: false, error: 'vm required' }
   const name = containerName(vm.id)
   const info = inspectContainer(name)
@@ -961,6 +964,7 @@ export function destroyVmRuntime(vm) {
 }
 
 export function stopVmRuntime(vm) {
+  if (vm?.execution_mode === 'docker_per_slot') return { ok: false, error: 'managed_slot_use_panel_stop' }
   const name = containerName(vm.id)
   const info = inspectContainer(name)
   if (!info) {

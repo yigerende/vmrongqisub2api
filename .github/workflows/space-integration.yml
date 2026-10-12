@@ -1,0 +1,28 @@
+name: space-integration
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run fetch:payload
+      - name: Build disposable slot image
+        run: docker build -t ghcr.io/dofastted/kin-os-ubuntu:24.04 docker/kin-os/ubuntu-24.04
+      - name: Verify managed slot contracts
+        run: node --test test/unit/managed-codex.test.mjs
+      - name: Verify real Docker and kernel lifecycle
+        env:
+          KIN_DOCKER_TEST: '1'
+        run: node --test test/e2e/managed-codex.docker.mjs

@@ -2,6 +2,7 @@
  * Host-side slot lifecycle. Docker and KVM share slotHost(vm); guest identity
  * / SOCKS / TLS stay inside the rust kernel and must not branch here.
  */
+import { managedCodex, startManagedContainer } from './codex-container.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
@@ -32,10 +33,12 @@ function unsupportedOnHost(action) {
 }
 
 export function startSlot(vm, projectRoot, opts = {}) {
+  if (managedCodex(vm)) return startManagedContainer(vm, projectRoot, opts)
   return slotHost(vm).start(vm, projectRoot, opts)
 }
 
 export async function startSlotReady(vm, projectRoot, opts = {}) {
+  if (managedCodex(vm)) return startManagedContainer(vm, projectRoot, opts)
   if (isCodexVm(vm)) {
     if (!slotHost(vm).supports('codex')) return unsupportedOnHost('codex')
     const boot = await startSlot(vm, projectRoot, opts)

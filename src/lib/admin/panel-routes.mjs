@@ -2,6 +2,8 @@
  * /admin and /api/panel routes. Login / logout / me and { ok, data }
  * envelopes are unchanged; slot start/reload go through startSlotReady.
  */
+import { createManagedCodex, handleManagedCodex, importManagedCodex } from './managed-codex.mjs'
+import { managedCodex } from '../vm/codex-container.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import {
@@ -1000,6 +1002,14 @@ export function createPanelHandler(ctx) {
       ) {
         return true
       }
+      if (req.method === 'GET' && p === '/api/panel/space-capabilities') {
+        return json(
+          res,
+          200,
+          panel.ok({ version: 1, docker_per_slot: true, account_container_names: true, delete_account: true }),
+        )
+      }
+      if (await handleManagedCodex({ req, res, url, cfg, routing: ctx.routingConfig, readBody, json })) return true
       if (p.startsWith('/api/panel/cluster/')) return ctx.clusterRoutes.handle(req, res, url)
       if (req.method === 'GET' && p === '/api/panel/database/metrics') {
         const snapshot = snapshotDatabaseMetrics({
@@ -2961,6 +2971,18 @@ export function createPanelHandler(ctx) {
       // POST /api/panel/vms/create — configurable seed VM + pure Claude Code home
       if (req.method === 'POST' && p === '/api/panel/vms/create') {
         const body = await readBody(req, 32 * 1024)
+        if (body.execution_mode === 'docker_per_slot') {
+          if (panelIdentity(req).role !== 'admin')
+            return json(res, 403, { ok: false, error: { code: 'admin_required' } })
+          try {
+            return json(res, 200, panel.ok(await createManagedCodex(cfg.paths.project, body, ctx.routingConfig)))
+          } catch (e) {
+            return json(res, e.status || 500, {
+              ok: false,
+              error: { code: e.code || 'create_failed', message: e.message },
+            })
+          }
+        }
         const existing = listVms(cfg.paths.project)
         // Usage, billing and account rows stay keyed by a deleted VM's id; handing that
         // id to a new slot makes it show the old account and spend. Auto-numbering skips them.
@@ -3363,12 +3385,29 @@ export function createPanelHandler(ctx) {
           if (!vmId) {
             return json(res, 400, { ok: false, error: { message: 'vm_id required (先创建虚拟机)' } })
           }
+          if (!isValidVmId(vmId)) return json(res, 400, { ok: false, error: { code: 'invalid_vm_id' } })
           const vmPath = path.join(cfg.paths.project, 'vms', `${vmId}.json`)
           if (!fs.existsSync(vmPath)) {
             return json(res, 404, { ok: false, error: { message: 'vm not found, 请先创建种子虚拟机' } })
           }
           const existing = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
           existing.id = existing.id || vmId
+          if (managedCodex(existing)) {
+            if (req.headers?.['x-space-assignment'] && req.headers['x-space-assignment'] !== existing.assignment_id)
+              return json(res, 409, { ok: false, error: { code: 'assignment_conflict' } })
+            try {
+              return json(
+                res,
+                200,
+                panel.ok(await importManagedCodex(cfg.paths.project, existing, body, ctx.routingConfig)),
+              )
+            } catch (e) {
+              return json(res, e.status || 500, {
+                ok: false,
+                error: { code: e.code || 'import_failed', message: e.message },
+              })
+            }
+          }
           if (isCodexVm(existing)) {
             const parsed = parseCodexImportPayload(body)
             if (!parsed.ok) {

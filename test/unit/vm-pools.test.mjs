@@ -46,6 +46,7 @@ test('pool membership is shared by keys and applied on the next read', () => {
     const gone = applyVmPool(keyScopeFromRecord({ vm_pool_id: pool.id, group_type: 'all' }), (id) => repo.get(id))
     assert.equal(gone.vm_pool_error, 'missing')
   } finally {
+    store.db.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -60,6 +61,7 @@ test('an empty pool stays empty instead of meaning every VM', () => {
     assert.deepEqual(scope.allowed_vms, [])
     assert.equal(store.list()[0].vm_pool_name, 'Empty')
   } finally {
+    store.db.close()
     fs.rmSync(dir, { recursive: true, force: true })
   }
 })

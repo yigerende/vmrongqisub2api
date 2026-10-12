@@ -115,6 +115,16 @@ export class VmPoolsRepo {
     return this.get(id)
   }
 
+  addMember(id, vmId) {
+    if (!this.get(id)?.enabled) throw Object.assign(new Error('账号池不存在或未启用'), { code: 'pool_unavailable' })
+    const other = this._other.get(vmId, id)
+    if (other) throw Object.assign(new Error('槽位已属于其他账号池'), { code: 'vm_in_other_pool' })
+    this.db
+      .prepare('INSERT OR IGNORE INTO vm_pool_members (pool_id, vm_id, created_at) VALUES (?, ?, ?)')
+      .run(id, vmId, nowIso())
+    return this.get(id)
+  }
+
   remove(id) {
     const info = this._delete.run(id)
     return info.changes > 0

@@ -216,7 +216,7 @@ export async function syncCodexCatalog({
           catalogVersion: catalogVersion.version,
         })
       let live = await fetchOnce()
-      if (live.error === 'upstream_auth' && rotate && refreshToken) {
+      if (live.error === 'upstream_auth' && rotate && refreshToken && target.execution_mode !== 'docker_per_slot') {
         const tok = await refreshCodexAccessToken({ refreshToken, proxyUrl, fetchImpl })
         if (!tok.ok) {
           lastError = {
@@ -1109,7 +1109,7 @@ export async function runVmTestChat(opts = {}) {
       timeoutMs,
       extraHeaders: opts.extraHeaders || {},
     })
-    if (codex && !result?.ok && looksLikeCodexUnauthorized(result)) {
+    if (codex && vm.execution_mode !== 'docker_per_slot' && !result?.ok && looksLikeCodexUnauthorized(result)) {
       const first = readCodexAccounts(projectRoot, vmId)[0] || {}
       const refreshToken = String(first.refresh_token || '').trim()
       if (refreshToken) {

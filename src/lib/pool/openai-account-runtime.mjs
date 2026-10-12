@@ -11,6 +11,11 @@ const RPM_WINDOW_MS = 60_000
 
 export const OPENAI_MAX_WAITERS = 100
 
+const blocked = new Set()
+export function blockOpenAISlot(id, value) {
+  if (value) blocked.add(id)
+  else if (blocked.delete(id)) wakeOpenAIWaiter()
+}
 const slots = new Map()
 const waiters = []
 const feedback = new Map()
@@ -73,6 +78,7 @@ export function bumpOpenAICursor() {
  * Returns a lease whose release() is idempotent, or null when full.
  */
 export function tryAcquireOpenAISlot(id, { concurrency = 1, maxRpm = 0, now = Date.now(), quotaPolicy = null } = {}) {
+  if (blocked.has(id)) return null
   // Candidate selection resolves pins against the same live policy snapshot.
   // Never replace a resolved legacy/pinned candidate cap with the global cap
   // here: doing so can sell more seats than the candidate was selected for.
@@ -166,6 +172,7 @@ export function reportOpenAIAttempt(id, kind, firstOutputMs = null, now = Date.n
 }
 
 export function resetOpenAIAccountRuntime() {
+  blocked.clear()
   slots.clear()
   feedback.clear()
   for (const entry of waiters.splice(0)) entry.wake()

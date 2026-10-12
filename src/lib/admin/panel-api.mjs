@@ -800,6 +800,7 @@ function gptQuotaFail(result) {
             : ErrorType.INVALID_REQUEST,
       code: result.error || 'openai_quota_failed',
       message: result.message || 'GPT 额度查询失败',
+      details: result.upstream_status ? { upstream_status: result.upstream_status } : undefined,
       status,
     }),
   )

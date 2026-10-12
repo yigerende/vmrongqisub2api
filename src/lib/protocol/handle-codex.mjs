@@ -897,6 +897,14 @@ function plainHeaders(headers) {
 
 /** One search call on one slot. Resolves `{ status, text, headers }`, or `{ status: 0, error }`. */
 async function postCodexSearch({ projectRoot, vm, body, turnMetadata, fetchImpl, refresh = refreshCodexAccessToken }) {
+  // This legacy endpoint bypasses the kernel. Never execute it on the host for
+  // a slot whose contract requires all inference to run inside its container.
+  if (vm.execution_mode === 'docker_per_slot')
+    return {
+      ok: false,
+      status: 501,
+      body: { error: { code: 'container_search_unsupported', message: '该槽位请使用 /v1/responses 的搜索工具' } },
+    }
   const proxyUrl = hostProxyUrlForVm(vm)
   if (!fetchImpl && !proxyUrl && !isLocalEgressProxy(vm.proxy)) return { status: 0, error: 'proxy_required' }
   const doFetch = fetchImpl || makeProxyFetch(proxyUrl, CODEX_SEARCH_TIMEOUT_MS, { maxMs: CODEX_SEARCH_TIMEOUT_MS })

@@ -2,6 +2,7 @@
  * Host-side Codex kernel lifecycle. Dedicated Codex VMs listen on
  * vms/<id>/run/codex-kernel.sock; Claude workers are never reused.
  */
+import { managedCodex, ensureManagedKernel, writeManagedConfig } from '../vm/codex-container.mjs'
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -41,6 +42,7 @@ export function codexKernelBinPath() {
 
 export function writeCodexKernelConfig(projectRoot, vm, { token, proxyUrl, proxyRequired } = {}) {
   if (!projectRoot || !vm?.id) return null
+  if (managedCodex(vm)) return writeManagedConfig(projectRoot, vm)
   assertProxyAllowed(vm.proxy)
   if (proxyUrl) assertProxyAllowed({ url: proxyUrl })
   const runDir = path.join(projectRoot, 'vms', vm.id, 'run')
@@ -81,6 +83,13 @@ export function writeCodexKernelConfig(projectRoot, vm, { token, proxyUrl, proxy
 }
 
 export async function ensureCodexKernel(exec, { timeoutMs = 8000 } = {}) {
+  if (managedCodex(exec.vm)) {
+    try {
+      return await ensureManagedKernel(exec)
+    } catch (e) {
+      return { ok: false, reason: e.code, error: e.message }
+    }
+  }
   const bin = codexKernelBinPath()
   if (!bin) return { ok: false, reason: 'bin_missing' }
   const paths = codexKernelPaths(exec)
