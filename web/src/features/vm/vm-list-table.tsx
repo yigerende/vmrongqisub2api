@@ -58,7 +58,7 @@ const COL_CLS: Record<VmColumnKey | 'actions', string> = {
   vm: 'min-w-[170px] flex-[1.15]',
   sched: 'min-w-[62px] flex-[0.3]',
   type: 'min-w-[120px] flex-[0.75]',
-  status: 'min-w-[140px] flex-[1.1]',
+  status: 'min-w-[170px] flex-[1.1]',
   req: 'min-w-[200px] flex-[1.2]',
   usage: 'min-w-[262px] flex-[1.7]',
   cost: 'min-w-[84px] flex-[0.55]',
@@ -210,6 +210,15 @@ function SeatTag({ vm }: { vm: Vm }) {
 function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
   const tone = poolStatus(vm)
   const inflight = Number(vm.inflight) || 0
+  const rpm =
+    vm.rpm != null && Number.isFinite(vm.rpm) && vm.rpm >= 0
+      ? Math.floor(vm.rpm)
+      : null
+  const rpmText = rpm == null ? '—' : fmtNum(rpm)
+  const rpmTitle =
+    rpm == null
+      ? 'RPM：暂无数据'
+      : `RPM：${rpm} · 最近 60 秒进入该槽位的请求数${vm.max_rpm ? ` · 上限 ${vm.max_rpm}` : ''}`
   const health = healthModel(vm)
   const showInflight =
     inflight > 0 &&
@@ -219,16 +228,36 @@ function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
   return (
     <div className='min-w-0 space-y-1'>
       {show.label ? (
-        <div className='flex items-center gap-1.5'>
+        <div className='flex flex-wrap items-center gap-1.5'>
           <StatusReason vm={vm} tone={tone} />
-          {showInflight ? (
+          <span className='inline-flex shrink-0 items-center gap-1'>
+            {showInflight ? (
+              <span
+                className='inline-flex size-5 items-center justify-center rounded-full bg-[color:var(--tier-pro-solid)] text-[11px] font-semibold text-[color:var(--tier-pro-solid-fg)] tabular-nums'
+                title={`并发：${inflight} 个请求正在处理`}
+                aria-label={`并发 ${inflight}`}
+              >
+                {inflight}
+              </span>
+            ) : null}
             <span
-              className='inline-flex size-5 items-center justify-center rounded-full bg-[color:var(--tier-pro-solid)] text-[11px] font-semibold text-[color:var(--tier-pro-solid-fg)] tabular-nums'
-              title={`在飞 ${inflight}`}
+              className={cn(
+                'inline-flex items-center justify-center rounded-full font-semibold tabular-nums',
+                rpmText.length > 4
+                  ? 'size-8 text-[9px]'
+                  : rpmText.length > 2
+                    ? 'size-6 text-[9px]'
+                    : 'size-5 text-[11px]',
+                rpm != null && rpm > 0
+                  ? 'bg-[color:var(--status-ok-bg)] text-[color:var(--status-ok)]'
+                  : 'bg-muted text-muted-foreground'
+              )}
+              title={rpmTitle}
+              aria-label={rpm == null ? 'RPM 暂无数据' : `RPM ${rpm}`}
             >
-              {inflight}
+              {rpmText}
             </span>
-          ) : null}
+          </span>
           <SeatTag vm={vm} />
         </div>
       ) : null}
