@@ -103,7 +103,9 @@ export function writeManagedConfig(root, vm) {
 export async function startManagedContainer(vm, root, { routing } = {}) {
   vm = assertManagedWritable(root, vm)
   let info = await inspectManagedContainer(vm)
-  if (info?.running) return { ok: true, runtime: vm.runtime }
+  const wasRunning = info?.running === true
+  if (!info && vm.runtime?.container_id)
+    throw containerError('container_missing', '原账号容器已被外部删除，请删除槽位后开启新轮次')
   if (info) {
     if (!info.running) await docker(['start', info.id])
   } else {
@@ -205,7 +207,9 @@ export async function startManagedContainer(vm, root, { routing } = {}) {
     observed_at: info.observed_at,
   }
   patchVmRecord(root, vm.id, { runtime, status: 'running' })
-  await command(root, vm, false)
+  // Reconcile a crash after docker run but before the runtime record was saved.
+  // A retry of an already active assignment must leave its guest kernel running.
+  if (!wasRunning || !vm.runtime?.container_id) await command(root, vm, false)
   return { ok: true, runtime }
 }
 async function command(root, vm, enabled, { restart = false } = {}) {

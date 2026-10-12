@@ -93,8 +93,7 @@ export async function createManagedCodex(root, body, routing = {}) {
       atomicWriteJson(path.join(root, 'vms', `${id}.json`), vm, { mode: 0o600 })
     }
     if (vm.status === 'deleting') throw containerError('slot_deleting')
-    const observed = await inspectManagedContainer(vm)
-    if (!observed?.running) await startManagedContainer(vm, root, { routing })
+    await startManagedContainer(vm, root, { routing })
     return {
       vm: summarizeVm(getVm(root, id), root, routing),
       container: await inspectManagedContainer(getVm(root, id)),

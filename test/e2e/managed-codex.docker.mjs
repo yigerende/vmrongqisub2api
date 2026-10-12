@@ -57,6 +57,12 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.equal(a.container.id, b.container.id)
     vm = getVm(root, a.vm.id)
     assert.equal(vm.pool_id, null, 'global key needs no pool')
+    patchVmRecord(root, vm.id, { status: 'creating', runtime: { type: 'docker' } })
+    const recovered = await createManagedCodex(root, input)
+    vm = getVm(root, vm.id)
+    assert.equal(recovered.container.id, a.container.id, 'recover the existing container after an interrupted save')
+    assert.equal(vm.status, 'running')
+    assert.equal(vm.runtime.container_id, a.container.id)
     const credential = {
       email: input.account_email,
       access_token: 'fixture-at',
@@ -103,6 +109,11 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.equal((await inspectManagedContainer(other)).running, true)
     assert.equal(JSON.parse(docker('inspect', sentinel))[0].State.Running, true)
     await assert.rejects(createManagedCodex(root, input), { code: 'assignment_deleted' })
+    docker('rm', '-f', other.container_name)
+    await assert.rejects(createManagedCodex(root, { ...input, assignment_id: other.assignment_id }), {
+      code: 'container_missing',
+    })
+    assert.equal(await inspectManagedContainer(other), null, 'do not create an orphan replacement')
   } catch (error) {
     // Only disposable fixture containers; never print credential/config files.
     const id = `space-${crypto.createHash('sha256').update(input.assignment_id).digest('hex').slice(0, 24)}`
