@@ -283,21 +283,18 @@ export async function withManagedMaintenance(root, vm, fn, { deleting = false, r
     try {
       if (deleting)
         patchVmRecord(root, vm.id, { status: 'deleting', schedulable: false, schedule_disabled_reason: 'deleting' })
-      const until = Date.now() + 30000
-      while (openAIRuntimeSignals(vm.id).inFlight > 0) {
-        if (Date.now() >= until) throw containerError('slot_busy', '槽位仍有请求，稍后重试')
-        await delay(100)
-      }
-      await starting.get(taskKey)?.catch(() => {})
-      const info = await inspectManagedContainer(current)
-      if (info?.running) {
-        try {
-          await command(root, current, false)
-        } catch (error) {
-          // A broken controller must not prevent an owned container from being deleted.
-          if (!deleting) throw error
+      if (!deleting) {
+        const until = Date.now() + 30000
+        while (openAIRuntimeSignals(vm.id).inFlight > 0) {
+          if (Date.now() >= until) throw containerError('slot_busy', '槽位仍有请求，稍后重试')
+          await delay(100)
         }
+        await starting.get(taskKey)?.catch(() => {})
       }
+      const info = await inspectManagedContainer(current)
+      // DELETE immediately removes the owned container, including active work.
+      // It must not add a drain phase or depend on the guest controller replying.
+      if (info?.running && !deleting) await command(root, current, false)
       const result = await fn(current, info)
       const saved = getVm(root, vm.id)
       if (restore && !deleting && saved?.status === 'running' && saved.schedulable) {

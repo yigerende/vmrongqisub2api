@@ -14,7 +14,6 @@ import { inspectManagedContainer, ensureManagedKernel, managedExec } from '../..
 import { readCodexAccounts, upsertCodexAccount } from '../../src/lib/vm/codex-slot.mjs'
 import { imageForKernel } from '../../src/lib/vm/os-catalog.mjs'
 import { queryOpenaiQuota, CHATGPT_USAGE_URL } from '../../src/lib/oauth/openai-quota.mjs'
-import { CODEX_OAUTH_TOKEN_URL } from '../../src/lib/protocol/codex-models.mjs'
 import { tryAcquireOpenAISlot, openAIRuntimeSignals } from '../../src/lib/pool/openai-account-runtime.mjs'
 
 test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and deletion', {
@@ -117,38 +116,23 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     } finally {
       inFlight.release()
     }
-    let refreshCalls = 0
-    let refreshWasExclusive = false
-    const renewedQuota = await queryOpenaiQuota({
+    const rejectedQuota = await queryOpenaiQuota({
       projectRoot: root,
       vmId: vm.id,
-      fetchImpl: async (url, init) => {
-        if (url === CODEX_OAUTH_TOKEN_URL) {
-          refreshCalls++
-          const lease = tryAcquireOpenAISlot(vm.id)
-          const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-          refreshWasExclusive = lease === null && state.running === false
-          lease?.release()
-          return { status: 200, json: async () => ({ access_token: 'refreshed-at', refresh_token: 'refreshed-rt' }) }
-        }
-        if (url === CHATGPT_USAGE_URL) {
-          if (init.headers.authorization !== 'Bearer refreshed-at') return { status: 401, json: async () => ({}) }
-          return {
-            status: 200,
-            json: async () => ({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18000 } } }),
-          }
-        }
-        return { status: 200, json: async () => ({ credits: [] }) }
+      fetchImpl: async (url) => {
+        assert.equal(url, CHATGPT_USAGE_URL, 'a rejected quota probe must not start credential maintenance')
+        return { status: 401, json: async () => ({}) }
       },
     })
-    assert.equal(renewedQuota.ok, true)
-    assert.equal(refreshCalls, 1)
-    assert.equal(refreshWasExclusive, true, 'only credential renewal drains and stops the guest')
-    assert.equal(readCodexAccounts(root, vm.id)[0].refresh_token, 'refreshed-rt')
-    assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).running, true)
-    const afterRefresh = tryAcquireOpenAISlot(vm.id)
-    assert.ok(afterRefresh, 'normal scheduling resumes after credential renewal')
-    afterRefresh.release()
+    assert.equal(rejectedQuota.upstream_status, 401)
+    assert.equal(readCodexAccounts(root, vm.id)[0].refresh_token, credential.refresh_token)
+    const afterRejectedQuota = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+    assert.equal(afterRejectedQuota.pid, kernelBeforeQuota.pid)
+    assert.equal(afterRejectedQuota.revision, kernelBeforeQuota.revision)
+    assert.equal(afterRejectedQuota.running, true)
+    const afterProbe = tryAcquireOpenAISlot(vm.id)
+    assert.ok(afterProbe, 'a rejected quota probe must not disable scheduling')
+    afterProbe.release()
     // An ambiguous import retry must not overwrite tokens already rotated by the guest.
     upsertCodexAccount(root, vm.id, { ...readCodexAccounts(root, vm.id)[0], refresh_token: 'rotated-rt' })
     await importManagedCodex(root, getVm(root, vm.id), credential)
@@ -169,10 +153,17 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.notEqual(other.container_name, vm.container_name)
     assert.notEqual(other.fingerprint.device_id, vm.fingerprint.device_id)
     const originalName = vm.container_name
-    patchVmRecord(root, vm.id, { container_name: sentinel })
-    assert.equal((await call('DELETE', '')).status, 409, 'must refuse an unrelated container')
-    patchVmRecord(root, vm.id, { container_name: originalName })
-    assert.equal((await call('DELETE', '')).status, 200)
+    const activeAtDelete = tryAcquireOpenAISlot(vm.id)
+    assert.ok(activeAtDelete)
+    try {
+      patchVmRecord(root, vm.id, { container_name: sentinel })
+      assert.equal((await call('DELETE', '')).status, 409, 'must refuse an unrelated container')
+      patchVmRecord(root, vm.id, { container_name: originalName })
+      assert.equal((await call('DELETE', '')).status, 200, 'delete must not wait for active requests')
+      assert.equal(openAIRuntimeSignals(vm.id).inFlight, 1, 'the held request has not drained')
+    } finally {
+      activeAtDelete.release()
+    }
     assert.equal((await call('DELETE', '')).status, 200)
     assert.equal(fs.existsSync(path.join(root, 'vms', vm.id)), false)
     assert.equal(getVm(root, vm.id), null)

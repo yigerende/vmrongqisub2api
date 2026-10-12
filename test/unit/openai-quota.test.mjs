@@ -140,7 +140,7 @@ test('quota headers use the access token account when imported metadata has no a
   )
 })
 
-function writeGptSlot(root, id = 'vm-codex-01') {
+function writeGptSlot(root, id = 'vm-codex-01', overrides = {}) {
   const dir = path.join(root, 'vms', id)
   fs.mkdirSync(dir, { recursive: true })
   fs.writeFileSync(
@@ -151,6 +151,7 @@ function writeGptSlot(root, id = 'vm-codex-01') {
       family: 'codex',
       proxy: { url: 'socks5h://127.0.0.1:1080' },
       codex: { has_access: true, has_refresh: true, chatgpt_account_id: 'acc-1' },
+      ...overrides,
     }),
   )
   fs.writeFileSync(
@@ -201,6 +202,34 @@ for (const guestRotates of [false, true]) {
     assert.equal(admitted, usageCalls + 1, 'requests remain admissible throughout the quota probe')
     assert.equal(readCodexAccounts(root, id)[0].refresh_token, guestRotates ? 'guest-rt' : 'rt')
     assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).schedulable, true)
+  })
+}
+
+for (const status of [401, 403, 429, 500]) {
+  test(`managed quota HTTP ${status} leaves credentials and scheduling untouched`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-managed-quota-error-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    const id = 'vm-codex-01'
+    writeGptSlot(root, id, { execution_mode: 'docker_per_slot', status: 'running', schedulable: true })
+    const calls = []
+    const result = await queryOpenaiQuota({
+      projectRoot: root,
+      vmId: id,
+      fetchImpl: async (url) => {
+        calls.push(url)
+        return { status, json: async () => ({}) }
+      },
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.upstream_status, status)
+    assert.deepEqual(calls, [CHATGPT_USAGE_URL], 'do not refresh tokens or call other endpoints')
+    const vm = JSON.parse(fs.readFileSync(path.join(root, 'vms', `${id}.json`), 'utf8'))
+    assert.equal(vm.schedulable, true)
+    assert.equal(vm.status, 'running')
+    assert.equal(readCodexAccounts(root, id)[0].refresh_token, 'rt')
+    const lease = tryAcquireOpenAISlot(id)
+    assert.ok(lease)
+    lease.release()
   })
 }
 
