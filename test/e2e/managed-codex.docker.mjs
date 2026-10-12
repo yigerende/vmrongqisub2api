@@ -103,6 +103,19 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.equal((await inspectManagedContainer(other)).running, true)
     assert.equal(JSON.parse(docker('inspect', sentinel))[0].State.Running, true)
     await assert.rejects(createManagedCodex(root, input), { code: 'assignment_deleted' })
+  } catch (error) {
+    // Only disposable fixture containers; never print credential/config files.
+    const id = `space-${crypto.createHash('sha256').update(input.assignment_id).digest('hex').slice(0, 24)}`
+    vm ||= getVm(root, id)
+    if (vm?.container_name) {
+      try {
+        console.error(docker('logs', '--tail', '20', vm.container_name))
+      } catch {}
+      try {
+        console.error(fs.readFileSync(path.join(root, 'vms', id, 'run', 'container-state.json'), 'utf8'))
+      } catch {}
+    }
+    throw error
   } finally {
     for (const name of [vm?.container_name, other?.container_name, sentinel].filter(Boolean)) {
       try {

@@ -163,7 +163,7 @@ export async function startManagedContainer(vm, root, { routing } = {}) {
         '--tmpfs',
         '/tmp:rw,nosuid,size=32m',
         '--user',
-        '0:0',
+        `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
         '--label',
         'kin.vm=1',
         '--label',
