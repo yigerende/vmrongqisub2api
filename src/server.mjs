@@ -65,6 +65,7 @@ import {
 import { makeError, ErrorType, ErrorCode } from './lib/core/errors.mjs'
 import * as panel from './lib/admin/panel-api.mjs'
 import { ProxyPool } from './lib/vm/proxy-pool.mjs'
+import { reconcileManagedCodexProxies } from './lib/admin/managed-codex.mjs'
 import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
 import { syncIpv6ProxyEgress } from './lib/vm/proxy-policy-runtime.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
@@ -359,6 +360,12 @@ try {
 } catch (e) {
   console.warn('[bootstrap] local egress seed failed', e?.message || e)
 }
+
+const managedProxyRepair = reconcileManagedCodexProxies(cfg.paths.project, proxyPool)
+if (managedProxyRepair.repaired.length)
+  console.log(`[bootstrap] restored local proxy bindings for ${managedProxyRepair.repaired.length} Space slot(s)`)
+for (const failure of managedProxyRepair.failed)
+  console.warn('[bootstrap] Space local proxy binding repair failed', failure.vm_id, failure.error)
 
 initPoolRuntime()
 try {

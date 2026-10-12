@@ -2,7 +2,15 @@ import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import { atomicWriteJson, isValidVmId, withVmLock } from '../vm/vm-file.mjs'
-import { getVm, summarizeVm, patchVmRecord, clearActiveVm, getActiveVmId } from '../vm/vm-registry.mjs'
+import {
+  getVm,
+  listVms,
+  summarizeVm,
+  patchVmRecord,
+  clearActiveVm,
+  getActiveVmId,
+  bindVmProxy,
+} from '../vm/vm-registry.mjs'
 import { removeVmFromDb, clearActiveVmFromDb } from '../vm/vm-db-sync.mjs'
 import { OS_CATALOG } from '../vm/os-catalog.mjs'
 import { resolveMachineSpec } from '../vm/machine-spec.mjs'
@@ -24,7 +32,48 @@ import {
 } from '../vm/codex-container.mjs'
 
 const tombstonePath = (root, id) => path.join(root, 'data', 'space-deleted', `${id}.json`)
-export async function createManagedCodex(root, body, routing = {}) {
+function boundProxy(proxyPool, id) {
+  return proxyPool.snapshot().proxies.find((proxy) => proxy.bound_vm_ids.includes(id))
+}
+
+function bindManagedLocalProxy(proxyPool, id) {
+  if (!proxyPool) throw containerError('proxy_pool_unavailable', '代理池不可用', 503)
+  const existing = boundProxy(proxyPool, id)
+  if (existing && existing.id !== 'px-local')
+    throw containerError('proxy_binding_conflict', '槽位已绑定其他代理，请先检查出口配置')
+  // Use the same binding limits and enabled checks as panel-created slots.
+  // Never fall back to an arbitrary proxy when the requested local exit is unavailable.
+  const result = proxyPool.bind('px-local', id)
+  if (!result.ok) {
+    const message =
+      result.error === 'proxy_bind_limit'
+        ? `本地代理绑定数已达上限（${result.max}），请调整代理池绑定上限或释放槽位`
+        : `无法绑定本地代理：${result.error}`
+    throw containerError(result.error, message)
+  }
+  return proxyPool.getProxyForVm(id)
+}
+
+// Repair old Space slots that recorded px-local only in vm.json. This runs before
+// serving requests and touches binding metadata only, never the container/kernel.
+export function reconcileManagedCodexProxies(root, proxyPool) {
+  const result = { repaired: [], failed: [] }
+  for (const vm of listVms(root)) {
+    if (!managedCodex(vm) || vm.status === 'deleting' || vm.proxy?.id !== 'px-local') continue
+    // A panel unbind clears vm.proxy; an existing binding (even disabled) belongs
+    // to the operator. Neither should be overridden during an upgrade.
+    if (boundProxy(proxyPool, vm.id)) continue
+    try {
+      bindVmProxy(root, vm.id, bindManagedLocalProxy(proxyPool, vm.id))
+      result.repaired.push(vm.id)
+    } catch (error) {
+      result.failed.push({ vm_id: vm.id, error: error.code || error.message })
+    }
+  }
+  return result
+}
+
+export async function createManagedCodex(root, body, routing = {}, proxyPool) {
   const assignment = String(body.assignment_id || '')
   if (!/^[a-zA-Z0-9:_-]{8,200}$/.test(assignment))
     throw containerError('invalid_assignment', '缺少稳定的账号轮次标识', 400)
@@ -33,6 +82,7 @@ export async function createManagedCodex(root, body, routing = {}) {
     if (fs.existsSync(tombstonePath(root, id)))
       throw containerError('assignment_deleted', '该账号轮次已删除，不能重复创建')
     let vm = getVm(root, id)
+    const isNew = !vm
     if (vm && (!managedCodex(vm) || vm.assignment_id !== assignment)) throw containerError('assignment_conflict')
     if (
       vm &&
@@ -89,10 +139,23 @@ export async function createManagedCodex(root, body, routing = {}) {
         created_at: now,
         updated_at: now,
       }
-      fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
-      atomicWriteJson(path.join(root, 'vms', `${id}.json`), vm, { mode: 0o600 })
     }
     if (vm.status === 'deleting') throw containerError('slot_deleting')
+    if (vm.proxy?.id !== 'px-local')
+      throw containerError('proxy_binding_conflict', '集成槽位需要绑定本地代理，请先检查出口配置')
+    const proxy = bindManagedLocalProxy(proxyPool, id)
+    if (isNew) {
+      try {
+        fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
+        atomicWriteJson(path.join(root, 'vms', `${id}.json`), vm, { mode: 0o600 })
+      } catch (error) {
+        proxyPool.unbindVm(id)
+        throw error
+      }
+    }
+    bindVmProxy(root, id, proxy)
+    // Keep the slot and its reservation on a Docker failure so a retry resumes
+    // the same assignment; DELETE releases both after container cleanup succeeds.
     await startManagedContainer(vm, root, { routing })
     return {
       vm: summarizeVm(getVm(root, id), root, routing),
@@ -102,7 +165,7 @@ export async function createManagedCodex(root, body, routing = {}) {
 }
 
 // Called only after the normal panel authentication, role and tenant checks.
-export async function handleManagedCodex({ req, res, url, cfg, routing, readBody, json }) {
+export async function handleManagedCodex({ req, res, url, cfg, routing, proxyPool, readBody, json }) {
   const root = cfg.paths.project
   const match = url.pathname.match(/^\/api\/panel\/vms\/([^/]+)(?:\/(.*))?$/)
   if (!match || !isValidVmId(match[1])) return false
@@ -127,6 +190,7 @@ export async function handleManagedCodex({ req, res, url, cfg, routing, readBody
           { assignment_id: assignment, deleted_at: new Date().toISOString() },
           { mode: 0o600 },
         )
+        proxyPool.unbindVm(id)
       })
       return json(res, 200, { ok: true, data: { deleted: id } })
     }
@@ -135,6 +199,7 @@ export async function handleManagedCodex({ req, res, url, cfg, routing, readBody
       if (req.headers?.['x-space-assignment'] && req.headers['x-space-assignment'] !== tombstone.assignment_id) {
         return json(res, 409, { ok: false, error: { code: 'assignment_conflict' } })
       }
+      proxyPool.unbindVm(id)
       return json(res, 200, { ok: true, data: { deleted: id } })
     }
     return false
@@ -163,6 +228,7 @@ export async function handleManagedCodex({ req, res, url, cfg, routing, readBody
           { assignment_id: vm.assignment_id, deleted_at: new Date().toISOString() },
           { mode: 0o600 },
         )
+        proxyPool.unbindVm(id)
         fs.rmSync(path.join(root, 'vms', `${id}.json`), { force: true })
       })
       return json(res, 200, { ok: true, data: { deleted: id } })

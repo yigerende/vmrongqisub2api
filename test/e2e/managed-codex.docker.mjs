@@ -15,6 +15,7 @@ import { readCodexAccounts, upsertCodexAccount } from '../../src/lib/vm/codex-sl
 import { imageForKernel } from '../../src/lib/vm/os-catalog.mjs'
 import { queryOpenaiQuota, CHATGPT_USAGE_URL } from '../../src/lib/oauth/openai-quota.mjs'
 import { tryAcquireOpenAISlot, openAIRuntimeSignals } from '../../src/lib/pool/openai-account-runtime.mjs'
+import { ProxyPool } from '../../src/lib/vm/proxy-pool.mjs'
 
 test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and deletion', {
   skip: process.env.KIN_DOCKER_TEST !== '1',
@@ -24,6 +25,9 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
   process.env.KIN_CODEX_KERNEL_BIN = path.resolve('bin/kin-codex-kernel')
   const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8' }).trim()
   openDatabase({ dataDir: path.join(root, 'data') })
+  const proxyPool = new ProxyPool({ dataDir: path.join(root, 'data') })
+  proxyPool.ensureLocal()
+  const create = (body) => createManagedCodex(root, body, {}, proxyPool)
   const sentinel = `space-unrelated-${crypto.randomBytes(5).toString('hex')}`
   const input = {
     assignment_id: `space-${crypto.randomBytes(24).toString('hex')}`,
@@ -44,6 +48,7 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
       url: new URL(`http://localhost/api/panel/vms/${vm.id}${action ? '/' + action : ''}`),
       cfg: { paths: { project: root } },
       routing: {},
+      proxyPool,
       readBody: async () => body,
       json: (_, status, payload) => {
         out = { status, payload }
@@ -54,13 +59,16 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
   }
   try {
     docker('run', '-d', '--name', sentinel, imageForKernel('ubuntu-24.04'), 'sleep', 'infinity')
-    const [a, b] = await Promise.all([createManagedCodex(root, input), createManagedCodex(root, input)])
+    const [a, b] = await Promise.all([create(input), create(input)])
     assert.equal(a.vm.id, b.vm.id)
     assert.equal(a.container.id, b.container.id)
     vm = getVm(root, a.vm.id)
     assert.equal(vm.pool_id, null, 'global key needs no pool')
+    assert.equal(vm.proxy.id, 'px-local')
+    assert.equal(vm.proxy_cli_enabled, true)
+    assert.deepEqual(proxyPool.snapshot().proxies.find((p) => p.id === 'px-local').bound_vm_ids, [vm.id])
     patchVmRecord(root, vm.id, { status: 'creating', runtime: { type: 'docker' } })
-    const recovered = await createManagedCodex(root, input)
+    const recovered = await create(input)
     vm = getVm(root, vm.id)
     assert.equal(recovered.container.id, a.container.id, 'recover the existing container after an interrupted save')
     assert.equal(vm.status, 'running')
@@ -145,7 +153,7 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     })
     assert.equal(getVm(root, vm.id).schedulable, false)
     assert.equal((await inspectManagedContainer(vm)).id, a.container.id)
-    const second = await createManagedCodex(root, {
+    const second = await create({
       ...input,
       assignment_id: `space-${crypto.randomBytes(24).toString('hex')}`,
     })
@@ -158,8 +166,11 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     try {
       patchVmRecord(root, vm.id, { container_name: sentinel })
       assert.equal((await call('DELETE', '')).status, 409, 'must refuse an unrelated container')
+      assert.equal(proxyPool.getProxyForVm(vm.id).id, 'px-local', 'failed deletion must keep the binding')
       patchVmRecord(root, vm.id, { container_name: originalName })
       assert.equal((await call('DELETE', '')).status, 200, 'delete must not wait for active requests')
+      assert.equal(proxyPool.getProxyForVm(vm.id), null, 'successful deletion releases the local binding')
+      assert.equal(proxyPool.getProxyForVm(other.id).id, 'px-local', 'other slots retain their bindings')
       assert.equal(openAIRuntimeSignals(vm.id).inFlight, 1, 'the held request has not drained')
     } finally {
       activeAtDelete.release()
@@ -169,9 +180,9 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.equal(getVm(root, vm.id), null)
     assert.equal((await inspectManagedContainer(other)).running, true)
     assert.equal(JSON.parse(docker('inspect', sentinel))[0].State.Running, true)
-    await assert.rejects(createManagedCodex(root, input), { code: 'assignment_deleted' })
+    await assert.rejects(create(input), { code: 'assignment_deleted' })
     docker('rm', '-f', other.container_name)
-    await assert.rejects(createManagedCodex(root, { ...input, assignment_id: other.assignment_id }), {
+    await assert.rejects(create({ ...input, assignment_id: other.assignment_id }), {
       code: 'container_missing',
     })
     assert.equal(await inspectManagedContainer(other), null, 'do not create an orphan replacement')

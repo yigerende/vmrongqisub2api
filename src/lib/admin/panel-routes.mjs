@@ -1009,7 +1009,8 @@ export function createPanelHandler(ctx) {
           panel.ok({ version: 1, docker_per_slot: true, account_container_names: true, delete_account: true }),
         )
       }
-      if (await handleManagedCodex({ req, res, url, cfg, routing: ctx.routingConfig, readBody, json })) return true
+      if (await handleManagedCodex({ req, res, url, cfg, routing: ctx.routingConfig, proxyPool, readBody, json }))
+        return true
       if (p.startsWith('/api/panel/cluster/')) return ctx.clusterRoutes.handle(req, res, url)
       if (req.method === 'GET' && p === '/api/panel/database/metrics') {
         const snapshot = snapshotDatabaseMetrics({
@@ -3004,7 +3005,11 @@ export function createPanelHandler(ctx) {
           if (panelIdentity(req).role !== 'admin')
             return json(res, 403, { ok: false, error: { code: 'admin_required' } })
           try {
-            return json(res, 200, panel.ok(await createManagedCodex(cfg.paths.project, body, ctx.routingConfig)))
+            return json(
+              res,
+              200,
+              panel.ok(await createManagedCodex(cfg.paths.project, body, ctx.routingConfig, proxyPool)),
+            )
           } catch (e) {
             return json(res, e.status || 500, {
               ok: false,
