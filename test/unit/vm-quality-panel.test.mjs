@@ -63,3 +63,36 @@ test('VM list enrichment retains quality history for admins only', async (t) => 
   const readOnly = await buildVmList({ ...args, role: 'super' })
   assert.equal(readOnly.data.items[0].quality, undefined)
 })
+
+test('Space batch quality endpoints accept the global master key and reject inference keys', async () => {
+  for (const apiKeyKind of ['master', 'managed']) {
+    for (const [method, suffix] of [
+      ['GET', 'capabilities'],
+      ['POST', 'results'],
+    ]) {
+      let reply
+      const refs = [{ id: 'space-a', assignment_id: 'cycle-a' }]
+      const handler = createPanelHandler({
+        cfg: { paths: { project: 'unused' } },
+        requireAuth(req) {
+          req.apiKeyKind = apiKeyKind
+          return true
+        },
+        readBody: async () => ({ slots: refs }),
+        qualityMonitor: {
+          results(slots) {
+            assert.deepEqual(slots, refs)
+            return { version: 1, slots: [] }
+          },
+        },
+        json: (_, status, body) => {
+          reply = { status, body }
+          return true
+        },
+      })
+      await handler({ method }, {}, new URL(`http://localhost/api/panel/vm-quality/${suffix}`))
+      assert.equal(reply.status, apiKeyKind === 'master' ? 200 : 403)
+      if (apiKeyKind === 'master') assert.equal(reply.body.data.version, 1)
+    }
+  }
+})

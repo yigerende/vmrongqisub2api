@@ -250,6 +250,8 @@ test('quality APIs validate writes, queue manual runs, and existing ACL limits t
     ['POST', 'enable'],
     ['POST', 'vm-a/run'],
     ['GET', 'vm-a/history'],
+    ['GET', 'capabilities'],
+    ['POST', 'results'],
   ]) {
     const path = `/api/panel/vm-quality/${suffix}`
     assert.equal(authorizePanelRoute(method, path, 'admin').ok, true)
@@ -279,4 +281,73 @@ test('quality APIs validate writes, queue manual runs, and existing ACL limits t
   assert.equal((await call('vm-a/run', 'POST')).status, 202)
   await monitor.idle()
   assert.equal((await call('vm-a/history', 'GET')).payload.data.history[0].source, 'manual')
+  assert.equal((await call('capabilities', 'GET')).payload.data.assignment_guard, true)
+  assert.equal((await call('results', 'POST', { slots: [] })).status, 400)
+})
+
+test('Space results are read-only, assignment guarded and include only the latest completed sample', async (t) => {
+  let answer = 'wrong'
+  const { monitor, vms, db } = fixture(t, {
+    runProbe: async () => ({ ok: true, complete: true, text: answer, duration_ms: 10 }),
+  })
+  Object.assign(vms[0], { assignment_id: 'cycle-a', execution_mode: 'docker_per_slot' })
+  const refs = [{ id: 'vm-a', assignment_id: 'cycle-a' }]
+  assert.equal(monitor.results(refs).slots[0].result, null)
+  assert.equal(db.prepare('SELECT count(*) AS n FROM vm_quality_state').get().n, 0)
+  monitor.enqueue('vm-a')
+  await monitor.idle()
+  const red = monitor.results(refs)
+  assert.equal(red.slots[0].result.status, 'degraded')
+  assert.equal(red.slots[0].current, true)
+  assert.equal(red.slots[0].result.source, 'manual')
+  assert.ok(red.slots[0].result.started_at)
+  assert.equal(red.slots[0].result.expected_answer, undefined)
+  const denied = monitor.results([{ id: 'vm-a', assignment_id: 'wrong' }]).slots[0]
+  assert.deepEqual(denied, { id: 'vm-a', error: 'assignment_mismatch' })
+  assert.deepEqual(monitor.results([{ id: 'gone', assignment_id: 'cycle-a' }]).slots, [
+    { id: 'gone', error: 'not_found' },
+  ])
+  answer = '7.5'
+  monitor.enqueue('vm-a')
+  await monitor.idle()
+  assert.equal(monitor.results(refs).slots[0].result.status, 'normal')
+  assert.ok(monitor.results(refs).slots[0].result.id > red.slots[0].result.id)
+  const reopened = createVmQualityMonitor({
+    db,
+    listTargets: () => vms,
+    runProbe: async () => {
+      throw new Error('must not probe')
+    },
+  })
+  t.after(() => reopened.stop())
+  assert.equal(reopened.results(refs).revision, red.revision)
+  assert.equal(reopened.results(refs).slots[0].current, true)
+  monitor.setConfig({ ...monitor.getConfig(), model: 'gpt-6.1-sol' })
+  assert.equal(monitor.results(refs).slots[0].current, false)
+  vms[0].email = 'replacement@example.test'
+  assert.equal(monitor.results(refs).slots[0].result, null)
+  assert.throws(() => monitor.results([...refs, ...refs]))
+  assert.throws(() => monitor.results([{ id: '../escape', assignment_id: 'cycle-a' }]))
+})
+
+test('Space cannot act on samples finishing under an old config or on pre-upgrade history', async (t) => {
+  let release
+  const { monitor, vms, db } = fixture(t, {
+    runProbe: () =>
+      new Promise((resolve) => {
+        release = resolve
+      }),
+  })
+  Object.assign(vms[0], { assignment_id: 'cycle-a', execution_mode: 'docker_per_slot' })
+  const refs = [{ id: 'vm-a', assignment_id: 'cycle-a' }]
+  monitor.enqueue('vm-a')
+  await new Promise((resolve) => queueMicrotask(resolve))
+  monitor.setConfig({ ...monitor.getConfig(), model: 'gpt-6.1-sol' })
+  release({ ok: true, complete: true, text: 'wrong', duration_ms: 10 })
+  await monitor.idle()
+  assert.equal(monitor.results(refs).slots[0].current, false)
+  db.prepare('UPDATE vm_quality_history SET payload = ?').run(
+    JSON.stringify({ status: 'degraded', checked_at: new Date().toISOString() }),
+  )
+  assert.equal(monitor.results(refs).slots[0].current, false)
 })

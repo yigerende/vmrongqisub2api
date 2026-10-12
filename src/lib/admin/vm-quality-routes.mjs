@@ -6,7 +6,11 @@ export async function handleVmQuality({ req, res, url, monitor, readBody, json }
     if (!monitor) throw Object.assign(new Error('检测服务未就绪'), { status: 503 })
     let data
     let status = 200
-    if (url.pathname === `${base}/settings` && req.method === 'GET') data = monitor.getConfig()
+    if (url.pathname === `${base}/capabilities` && req.method === 'GET')
+      data = { version: 1, max_slots: 100, read_only: true, assignment_guard: true }
+    else if (url.pathname === `${base}/results` && req.method === 'POST')
+      data = monitor.results((await readBody(req, 65536)).slots)
+    else if (url.pathname === `${base}/settings` && req.method === 'GET') data = monitor.getConfig()
     else if (url.pathname === `${base}/settings` && req.method === 'PUT')
       data = monitor.setConfig(await readBody(req, 1024 * 1024))
     else if (url.pathname === `${base}/enable` && req.method === 'POST') {

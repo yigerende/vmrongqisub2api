@@ -1013,6 +1013,7 @@ export function createPanelHandler(ctx) {
             account_container_names: true,
             delete_account: true,
             proxy_selection: true,
+            quality_results: true,
           }),
         )
       }

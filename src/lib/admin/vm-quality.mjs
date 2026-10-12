@@ -1,9 +1,11 @@
 import crypto from 'node:crypto'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { VmQualityRepo } from '../db/repos/vm-quality-repo.mjs'
+import { withTransaction } from '../db/database.mjs'
 import { DEFAULT_QUALITY_CONFIG, evaluateQuality, validateQualityConfig } from './vm-quality-config.mjs'
 
 const CONFIG_KEY = 'vm_quality_config'
+const REVISION_KEY = 'vm_quality_revision'
 
 // Token refresh and proxy changes do not change account identity. Reset/replacement does.
 export function qualityIdentity(vm) {
@@ -33,7 +35,8 @@ export function createVmQualityMonitor({
   const settings = new SettingsRepo(db)
   const repo = new VmQualityRepo(db)
   let config = validateQualityConfig(settings.get(CONFIG_KEY, DEFAULT_QUALITY_CONFIG))
-  let revision = crypto.randomUUID()
+  let revision = settings.get(REVISION_KEY, null) || crypto.randomUUID()
+  settings.set(REVISION_KEY, revision)
   let timer = null
   let stopped = false
   const pending = new Map()
@@ -62,12 +65,14 @@ export function createVmQualityMonitor({
     const next = validateQualityConfig(input)
     const changed =
       JSON.stringify({ ...config, default_enabled: false }) !== JSON.stringify({ ...next, default_enabled: false })
+    const nextRevision = changed ? crypto.randomUUID() : revision
+    withTransaction(db, () => {
+      settings.set(CONFIG_KEY, next)
+      settings.set(REVISION_KEY, nextRevision)
+      if (changed) repo.reschedule()
+    })
     config = next
-    settings.set(CONFIG_KEY, config)
-    if (changed) {
-      revision = crypto.randomUUID()
-      repo.reschedule()
-    }
+    revision = nextRevision
     for (const id of repo.ids()) repo.trim(id, config.history_limit)
     return structuredClone(config)
   }
@@ -111,6 +116,8 @@ export function createVmQualityMonitor({
       const verdict = evaluateQuality(q, question, probe)
       const result = {
         ...verdict,
+        revision: runRevision,
+        started_at: new Date(startedAt).toISOString(),
         source: job.source,
         checked_at: new Date(now()).toISOString(),
         question_id: question.id,
@@ -196,6 +203,52 @@ export function createVmQualityMonitor({
     snapshot,
     enqueue,
     tick,
+    results(slots) {
+      if (
+        !Array.isArray(slots) ||
+        slots.length < 1 ||
+        slots.length > 100 ||
+        slots.some(
+          (slot) =>
+            !slot ||
+            typeof slot.id !== 'string' ||
+            !/^[a-zA-Z0-9_-]+$/.test(slot.id) ||
+            typeof slot.assignment_id !== 'string' ||
+            !slot.assignment_id ||
+            slot.assignment_id.length > 256,
+        ) ||
+        new Set(slots.map((slot) => slot.id)).size !== slots.length
+      )
+        throw new Error('slots 必须包含 1 至 100 个不同槽位及其 assignment_id')
+      return {
+        version: 1,
+        server_now: new Date(now()).toISOString(),
+        revision,
+        slots: slots.map(({ id, assignment_id }) => {
+          const vm = current(id)
+          if (!vm) return { id, error: 'not_found' }
+          if (vm.assignment_id !== assignment_id || vm.execution_mode !== 'docker_per_slot')
+            return { id, error: 'assignment_mismatch' }
+          const state = repo.get(id)
+          const identity = qualityIdentity(vm)
+          const latest = state?.identity === identity ? repo.history(id, 1)[0] : null
+          // Reading results neither creates state nor queues inference. Old histories remain
+          // visible in the panel, but cannot drive Space actions under a new config/identity.
+          const result = latest
+            ? { ...latest, answer: String(latest.answer || '').slice(0, 4000), expected_answer: undefined }
+            : null
+          return {
+            id,
+            assignment_id,
+            identity,
+            enabled: !!state?.enabled,
+            running: pending.has(id),
+            current: !!result && result.revision === revision,
+            result,
+          }
+        }),
+      }
+    },
     history(id) {
       const vm = current(id)
       if (!vm) throw Object.assign(new Error('槽位不存在'), { status: 404 })
