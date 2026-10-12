@@ -89,7 +89,7 @@ function kernelStateError(exec, allowMissing = false) {
   try {
     vm = JSON.parse(fs.readFileSync(exec.vmPath, 'utf8'))
   } catch (error) {
-    return allowMissing && error.code === 'ENOENT' ? null : 'slot_unavailable'
+    return allowMissing && !exec.vm?.fingerprint?.device_id && error.code === 'ENOENT' ? null : 'slot_unavailable'
   }
   if (['rebuilding', 'deleting'].includes(vm.status)) return `slot_${vm.status}`
   if (exec.vm?.fingerprint?.device_id && exec.vm.fingerprint.device_id !== vm.fingerprint?.device_id)

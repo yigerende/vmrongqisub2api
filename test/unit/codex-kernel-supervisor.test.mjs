@@ -183,5 +183,6 @@ test('reset state and replaced fingerprint block stale requests from writing or 
   }
   fs.unlinkSync(f.vmPath)
   assert.equal((await f.supervisor.ensure(f.exec)).reason, 'slot_unavailable')
+  assert.throws(() => writeCodexKernelConfig(f.root, f.exec.vm), /slot_unavailable/)
   assert.equal(f.children.length, 0)
 })

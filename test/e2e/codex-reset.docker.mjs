@@ -47,6 +47,7 @@ test('legacy reset reaps host kernels before wiping files, and can repeat withou
   const ids = [`gpt-reset-${suffix}`, `gpt-other-${suffix}`]
   const originalPath = process.env.PATH
   process.env.KIN_CODEX_KERNEL_BIN = path.resolve('bin/kin-codex-kernel')
+  fs.mkdirSync(path.join(root, 'vms'))
   openDatabase({ dataDir: path.join(root, 'data') })
   let orphan
   const response = {}
