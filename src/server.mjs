@@ -57,6 +57,7 @@ import { RequestLogStore } from './lib/admin/request-log.mjs'
 import {
   listVms,
   getVm,
+  summarizeVm,
   getActiveVmId,
   setVmSchedulable,
   isCodexVm,
@@ -96,6 +97,8 @@ import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
 import { handleUserCountTokens, handleUserUsage } from './lib/protocol/user-count-tokens.mjs'
 import { createPanelHandler } from './lib/admin/panel-routes.mjs'
+import { createVmQualityMonitor } from './lib/admin/vm-quality.mjs'
+import { runVmQualityProbe } from './lib/admin/vm-quality-probe.mjs'
 
 const FEATURES = [
   'passthrough',
@@ -850,7 +853,19 @@ cliNodeGuard = createCliNodeGuard({
   liveTokens: () => slotShell.liveShellTokens?.() || [],
 })
 
+const qualityMonitor = createVmQualityMonitor({
+  db: getDb(),
+  listTargets: () => listVms(cfg.paths.project),
+  getTarget: (id) => {
+    const vm = getVm(cfg.paths.project, id)
+    return vm ? summarizeVm(vm, cfg.paths.project) : null
+  },
+  runProbe: (options) =>
+    runVmQualityProbe({ ...options, baseUrl: `http://127.0.0.1:${cfg.port}`, apiKey: cfg.api_key }),
+})
+
 const handlePanel = createPanelHandler({
+  qualityMonitor,
   json,
   writeSSEHeaders,
   readBody,
@@ -1145,6 +1160,7 @@ function shutdown(signal) {
   try {
     healthMonitor?.stop?.()
   } catch {}
+  qualityMonitor.stop()
   try {
     credentialRefreshMonitor?.stop?.()
   } catch {}
@@ -1182,6 +1198,7 @@ process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
 
 server.listen(cfg.port, cfg.host, () => {
+  qualityMonitor.start()
   try {
     healthMonitor?.start?.({ immediate: true })
   } catch (e) {

@@ -1,0 +1,44 @@
+export type QualityQuestion = {
+  id: string
+  name: string
+  enabled: boolean
+  prompt: string
+  answer: string
+  match_mode: 'answer' | 'keyword' | 'regex'
+  max_duration_ms: number
+}
+
+export type QualityConfig = {
+  model: string
+  claude_model: string
+  reasoning_effort: 'low' | 'medium' | 'high' | 'xhigh'
+  mode: 'content' | 'time' | 'content_time'
+  interval_seconds: number
+  retry_seconds: number
+  concurrency: number
+  timeout_seconds: number
+  history_limit: number
+  default_enabled: boolean
+  questions: QualityQuestion[]
+}
+
+export type QualityResult = {
+  id: number
+  status: 'normal' | 'error' | 'degraded'
+  source: 'manual' | 'auto'
+  checked_at: string
+  question_name: string
+  answer?: string
+  expected_answer?: string
+  reason: string
+  duration_ms: number
+  model: string
+  response_model?: string | null
+}
+
+export type QualitySnapshot = {
+  enabled: boolean
+  running: boolean
+  next_at: number | null
+  history: QualityResult[]
+}

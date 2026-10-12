@@ -52,6 +52,7 @@ import {
 } from '@/features/vm/use-vm-column-order'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
+import { VmQualityStatus } from './quality-status'
 
 /** 列的宽度与弹性；顺序由 `useVmColumnOrder` 决定，不写死在这里。 */
 const COL_CLS: Record<VmColumnKey | 'actions', string> = {
@@ -286,6 +287,7 @@ function StatusCell({ vm, show }: { vm: Vm; show: StatusBarShow }) {
         </div>
       ) : null}
       {show.proxy ? <ProxyChip vm={vm} compact /> : null}
+      <VmQualityStatus vm={vm} />
     </div>
   )
 }

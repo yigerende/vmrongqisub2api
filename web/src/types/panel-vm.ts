@@ -162,6 +162,7 @@ export type VmMachine = {
 }
 
 export type Vm = {
+  quality?: import('@/features/vm/quality-types').QualitySnapshot
   id: string
   name?: string
   owner_user_id?: string | null

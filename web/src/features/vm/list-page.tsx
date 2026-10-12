@@ -43,6 +43,7 @@ import {
   type VmKindFilter,
   type VmSortKey,
 } from '@/features/vm/vm-table'
+import { VmQualitySettings } from './quality-settings'
 
 const SORT_CHIPS = [
   ['status', '状态'],
@@ -145,6 +146,7 @@ export function VmListPage() {
           onFilter={setFilter}
         />
         <div className='mb-4 flex flex-wrap items-center gap-2'>
+          {me.data?.role === 'admin' ? <VmQualitySettings /> : null}
           <KindFilterChips vms={vms} kind={kind} onChange={setKind} />
           <Separator orientation='vertical' className='mx-1 h-5' />
           <Input

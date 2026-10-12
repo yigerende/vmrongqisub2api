@@ -530,7 +530,29 @@ function parseSseBuffer(buffer, onEvent) {
   }
 }
 
-async function consumeMessagesResponse(res) {
+async function boundedResponseJson(res, maxBytes) {
+  if (!Number.isFinite(maxBytes)) return res.json().catch(() => null)
+  const reader = res.body.getReader()
+  const chunks = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maxBytes) {
+      await reader.cancel()
+      throw new Error('测试响应过大')
+    }
+    chunks.push(Buffer.from(value))
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    return null
+  }
+}
+
+async function consumeMessagesResponse(res, { maxResponseBytes = Infinity } = {}) {
   const status = res.status
   const headers = {}
   res.headers.forEach((v, k) => {
@@ -552,7 +574,7 @@ async function consumeMessagesResponse(res) {
 
   const ctype = String(headers['content-type'] || '')
   if (!ctype.includes('text/event-stream') && !ctype.includes('text/plain')) {
-    const body = await res.json().catch(() => null)
+    const body = await boundedResponseJson(res, maxResponseBytes)
     const blocks = Array.isArray(body?.content) ? body.content : []
     const text = blocks
       .filter((b) => b?.type === 'text')
@@ -560,6 +582,7 @@ async function consumeMessagesResponse(res) {
       .join('')
     return {
       ok: true,
+      complete: ['end_turn', 'stop_sequence'].includes(body?.stop_reason),
       status,
       headers,
       body,
@@ -578,11 +601,14 @@ async function consumeMessagesResponse(res) {
   let model = null
   let messageId = null
   let lastError = null
+  let complete = false
+  let responseBytes = 0
   const reader = res.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
   const onEvent = (ev) => {
     if (!ev || typeof ev !== 'object') return
+    if (ev.type === 'message_stop') complete = true
     if (ev.type === 'message_start' && ev.message) {
       if (ev.message.id) messageId = ev.message.id
       if (ev.message.usage) usage = { ...usage, ...ev.message.usage }
@@ -611,6 +637,11 @@ async function consumeMessagesResponse(res) {
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
+    responseBytes += value.byteLength
+    if (responseBytes > maxResponseBytes) {
+      await reader.cancel()
+      throw new Error('测试响应过大')
+    }
     buf += dec.decode(value, { stream: true })
     buf = parseSseBuffer(buf, onEvent)
   }
@@ -635,6 +666,7 @@ async function consumeMessagesResponse(res) {
   }
   return {
     ok: true,
+    complete: complete && ['end_turn', 'stop_sequence'].includes(stopReason),
     status,
     headers,
     body: {
@@ -669,7 +701,7 @@ function extractResponsesText(body) {
   return parts.join('')
 }
 
-async function consumeResponsesResponse(res) {
+async function consumeResponsesResponse(res, { maxResponseBytes = Infinity } = {}) {
   const status = res.status
   const headers = {}
   res.headers.forEach((v, k) => {
@@ -691,9 +723,10 @@ async function consumeResponsesResponse(res) {
 
   const ctype = String(headers['content-type'] || '')
   if (!ctype.includes('text/event-stream') && !ctype.includes('text/plain')) {
-    const body = await res.json().catch(() => null)
+    const body = await boundedResponseJson(res, maxResponseBytes)
     return {
       ok: true,
+      complete: body?.status === 'completed',
       status,
       headers,
       body,
@@ -711,6 +744,8 @@ async function consumeResponsesResponse(res) {
   let responseId = null
   let lastError = null
   let stopReason = null
+  let complete = false
+  let responseBytes = 0
   const reader = res.body.getReader()
   const dec = new TextDecoder()
   let buf = ''
@@ -722,6 +757,7 @@ async function consumeResponsesResponse(res) {
       return
     }
     if (type === 'response.completed' && ev.response) {
+      complete = !ev.response.status || ev.response.status === 'completed'
       if (ev.response.id) responseId = ev.response.id
       if (ev.response.model) model = ev.response.model
       if (ev.response.usage) usage = ev.response.usage
@@ -733,11 +769,17 @@ async function consumeResponsesResponse(res) {
     if (type === 'error' || type === 'response.failed') {
       lastError = ev.error || ev.response?.error || ev
     }
+    if (type === 'response.incomplete') lastError = { message: '测试响应不完整' }
     if (ev.model) model = ev.model
   }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
+    responseBytes += value.byteLength
+    if (responseBytes > maxResponseBytes) {
+      await reader.cancel()
+      throw new Error('测试响应过大')
+    }
     buf += dec.decode(value, { stream: true })
     buf = parseSseBuffer(buf, onEvent)
   }
@@ -757,6 +799,7 @@ async function consumeResponsesResponse(res) {
   }
   return {
     ok: true,
+    complete,
     status,
     headers,
     body: {
@@ -805,7 +848,18 @@ function freshLoopbackRequest(rawUrl, init = {}) {
   })
 }
 
-async function postV1Loopback({ path, baseUrl, apiKey, inbound, headers, vmId, timeoutMs, extraHeaders = {} }) {
+export async function postV1Loopback({
+  path,
+  baseUrl,
+  apiKey,
+  inbound,
+  headers,
+  vmId,
+  timeoutMs,
+  extraHeaders = {},
+  signal,
+  maxResponseBytes,
+}) {
   const ac = new AbortController()
   const timer = setTimeout(() => ac.abort(), timeoutMs)
   const endpoint = path === '/v1/responses' ? '/v1/responses' : '/v1/messages'
@@ -822,9 +876,11 @@ async function postV1Loopback({ path, baseUrl, apiKey, inbound, headers, vmId, t
         ...extraHeaders,
       },
       body: JSON.stringify(inbound),
-      signal: ac.signal,
+      signal: signal ? AbortSignal.any([ac.signal, signal]) : ac.signal,
     })
-    return endpoint === '/v1/responses' ? await consumeResponsesResponse(res) : await consumeMessagesResponse(res)
+    return endpoint === '/v1/responses'
+      ? await consumeResponsesResponse(res, { maxResponseBytes })
+      : await consumeMessagesResponse(res, { maxResponseBytes })
   } catch (e) {
     const aborted = ac.signal.aborted
     return {

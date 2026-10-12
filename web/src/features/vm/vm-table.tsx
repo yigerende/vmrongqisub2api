@@ -31,6 +31,7 @@ import {
 import { VmUsageWindows } from '@/features/vm/usage-windows'
 import { VmActionMenu } from '@/features/vm/vm-action-menu'
 import { useVmActions } from '@/features/vm/vm-actions-context'
+import { VmQualityStatus } from './quality-status'
 
 /**
  * 网格卡片。三段式：**是谁**（名称 / 邮箱 / 等级）→ **还剩多少**（统一用量窗口）
@@ -113,6 +114,7 @@ function VmCard({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
       <ProxyChip vm={vm} className='w-full' compact />
 
       <VmUsageWindows vm={vm} accounts={accounts} quiet quotaActions />
+      <VmQualityStatus vm={vm} />
 
       {/* 层级靠尺寸与字重建立，不靠颜色：累计是决策数字，今日是参考值。 */}
       <div className='mt-auto flex items-end justify-between gap-3'>

@@ -3,6 +3,7 @@
  * envelopes are unchanged; slot start/reload go through startSlotReady.
  */
 import { createManagedCodex, handleManagedCodex, importManagedCodex } from './managed-codex.mjs'
+import { handleVmQuality } from './vm-quality-routes.mjs'
 import { managedCodex } from '../vm/codex-container.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -1015,6 +1016,7 @@ export function createPanelHandler(ctx) {
           }),
         )
       }
+      if (await handleVmQuality({ req, res, url, monitor: ctx.qualityMonitor, readBody, json })) return true
       if (await handleManagedCodex({ req, res, url, cfg, routing: ctx.routingConfig, proxyPool, readBody, json }))
         return true
       if (p.startsWith('/api/panel/cluster/')) return ctx.clusterRoutes.handle(req, res, url)
@@ -1730,6 +1732,7 @@ export function createPanelHandler(ctx) {
           200,
           await panel.buildVmList({
             cfg,
+            qualityMonitor: ctx.qualityMonitor,
             accountQuota,
             routingConfig: ctx.routingConfig,
             poolScheduler: ctx.poolScheduler,

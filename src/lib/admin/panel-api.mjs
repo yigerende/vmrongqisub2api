@@ -583,6 +583,7 @@ export async function buildDashboard({
 
 export async function buildVmList({
   cfg,
+  qualityMonitor = null,
   accountQuota,
   routingConfig = {},
   poolScheduler = null,
@@ -599,6 +600,7 @@ export async function buildVmList({
   const pool = poolScheduler?.snapshot?.() || {}
   const poolSnap = snapshotPool(proxyPool)
   const listed = filterVmsForPanel(listVms(cfg.paths.project, routingConfig), { role, userId: ownerUserId })
+  if (qualityMonitor && role === 'admin') for (const vm of listed) vm.quality = qualityMonitor.snapshot(vm)
   const liveById = await collectLivePanelCredentials(cfg.paths.project, listed)
   const vms = listed.map((v) =>
     enrichVm(v, accountQuota, active, {
@@ -1714,6 +1716,7 @@ function enrichVm(v, accountQuota, active, extras = {}) {
     restrictionReason,
   })
   return {
+    ...(v.quality ? { quality: v.quality } : {}),
     id: v.id,
     name: v.name,
     status: v.status,
