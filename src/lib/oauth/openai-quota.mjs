@@ -4,6 +4,8 @@
  * without auto-reset, spark shadow, or agent-identity recovery.
  */
 import crypto from 'node:crypto'
+import path from 'node:path'
+import { withVmLock } from '../vm/vm-file.mjs'
 import { getVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isCodexVm } from '../vm/vm-kind.mjs'
 import { isLocalEgressProxy } from '../vm/egress.mjs'
@@ -397,21 +399,34 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
   }
 }
 
-export async function queryOpenaiQuota({
-  projectRoot,
-  vmId,
-  fetchImpl,
-  rotate = true,
-  policy = null,
-  managedLocked = false,
-} = {}) {
+export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {
   const vm = getVm(projectRoot, vmId)
-  if (vm?.execution_mode === 'docker_per_slot' && !managedLocked) {
-    const { withManagedMaintenance } = await import('../vm/codex-container.mjs')
+  if (vm?.execution_mode === 'docker_per_slot') {
     try {
-      return await withManagedMaintenance(projectRoot, vm, () =>
-        queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate, policy, managedLocked: true }),
-      )
+      // Serialize quota persistence with import/delete, while ordinary inference
+      // continues. Reading usage must not drain requests or restart the kernel.
+      const result = await withVmLock(path.join(projectRoot, 'vms', `${vmId}.json`), async () => {
+        const slot = await loadSlot(projectRoot, vmId)
+        if (!slot.ok) return slot
+        if (slot.vm.status === 'deleting') return fail('slot_deleting', '槽位正在清理', 409)
+        const options = { fetchImpl, rotate: false, projectRoot, vmId, policy }
+        const result = await queryUpstream(slot, options)
+        if (result.error === 'upstream_auth' && rotate) {
+          // The guest may have renewed the AT while this probe was in flight.
+          const fresh = await loadSlot(projectRoot, vmId)
+          if (fresh.ok && fresh.access !== slot.access) return queryUpstream(fresh, options)
+        }
+        return result
+      })
+      if (result.error !== 'upstream_auth' || !rotate) return result
+      // Only a rejected credential needs exclusive refresh. Stop the guest here
+      // so two processes cannot consume the same refresh token concurrently.
+      const { withManagedMaintenance } = await import('../vm/codex-container.mjs')
+      return await withManagedMaintenance(projectRoot, vm, async () => {
+        const slot = await loadSlot(projectRoot, vmId)
+        if (!slot.ok) return slot
+        return queryUpstream(slot, { fetchImpl, rotate, projectRoot, vmId, policy })
+      })
     } catch (error) {
       return fail(error.code || 'slot_busy', error.message, error.status || 503)
     }

@@ -13,6 +13,9 @@ import { getVm, patchVmRecord } from '../../src/lib/vm/vm-registry.mjs'
 import { inspectManagedContainer, ensureManagedKernel, managedExec } from '../../src/lib/vm/codex-container.mjs'
 import { readCodexAccounts, upsertCodexAccount } from '../../src/lib/vm/codex-slot.mjs'
 import { imageForKernel } from '../../src/lib/vm/os-catalog.mjs'
+import { queryOpenaiQuota, CHATGPT_USAGE_URL } from '../../src/lib/oauth/openai-quota.mjs'
+import { CODEX_OAUTH_TOKEN_URL } from '../../src/lib/protocol/codex-models.mjs'
+import { tryAcquireOpenAISlot, openAIRuntimeSignals } from '../../src/lib/pool/openai-account-runtime.mjs'
 
 test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and deletion', {
   skip: process.env.KIN_DOCKER_TEST !== '1',
@@ -79,6 +82,73 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.ok(!info.Mounts.some((m) => /docker.sock/.test(m.Source)))
     assert.equal(docker('exec', vm.container_name, 'cat', '/etc/machine-id'), vm.fingerprint.guest_machine_id)
     assert.equal((await call('POST', 'schedulable', { schedulable: true })).status, 200)
+    const statePath = path.join(root, 'vms', vm.id, 'run', 'container-state.json')
+    const kernelBeforeQuota = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+    const inFlight = tryAcquireOpenAISlot(vm.id, { concurrency: 2 })
+    assert.ok(inFlight)
+    try {
+      let admitted = 0
+      const quota = await queryOpenaiQuota({
+        projectRoot: root,
+        vmId: vm.id,
+        fetchImpl: async (url) => {
+          assert.equal(openAIRuntimeSignals(vm.id).inFlight, 1)
+          const next = tryAcquireOpenAISlot(vm.id, { concurrency: 2 })
+          if (next) {
+            admitted++
+            next.release()
+          }
+          return {
+            status: 200,
+            json: async () =>
+              url === CHATGPT_USAGE_URL
+                ? { rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18000 } } }
+                : { credits: [] },
+          }
+        },
+      })
+      assert.equal(quota.ok, true)
+      assert.equal(admitted, 2, 'usage polling must keep accepting requests')
+      const kernelAfterQuota = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+      assert.equal(kernelAfterQuota.pid, kernelBeforeQuota.pid, 'usage polling must not restart the kernel')
+      assert.equal(kernelAfterQuota.revision, kernelBeforeQuota.revision)
+      assert.equal(kernelAfterQuota.running, true)
+      assert.equal(getVm(root, vm.id).schedulable, true)
+    } finally {
+      inFlight.release()
+    }
+    let refreshCalls = 0
+    let refreshWasExclusive = false
+    const renewedQuota = await queryOpenaiQuota({
+      projectRoot: root,
+      vmId: vm.id,
+      fetchImpl: async (url, init) => {
+        if (url === CODEX_OAUTH_TOKEN_URL) {
+          refreshCalls++
+          const lease = tryAcquireOpenAISlot(vm.id)
+          const state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+          refreshWasExclusive = lease === null && state.running === false
+          lease?.release()
+          return { status: 200, json: async () => ({ access_token: 'refreshed-at', refresh_token: 'refreshed-rt' }) }
+        }
+        if (url === CHATGPT_USAGE_URL) {
+          if (init.headers.authorization !== 'Bearer refreshed-at') return { status: 401, json: async () => ({}) }
+          return {
+            status: 200,
+            json: async () => ({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18000 } } }),
+          }
+        }
+        return { status: 200, json: async () => ({ credits: [] }) }
+      },
+    })
+    assert.equal(renewedQuota.ok, true)
+    assert.equal(refreshCalls, 1)
+    assert.equal(refreshWasExclusive, true, 'only credential renewal drains and stops the guest')
+    assert.equal(readCodexAccounts(root, vm.id)[0].refresh_token, 'refreshed-rt')
+    assert.equal(JSON.parse(fs.readFileSync(statePath, 'utf8')).running, true)
+    const afterRefresh = tryAcquireOpenAISlot(vm.id)
+    assert.ok(afterRefresh, 'normal scheduling resumes after credential renewal')
+    afterRefresh.release()
     // An ambiguous import retry must not overwrite tokens already rotated by the guest.
     upsertCodexAccount(root, vm.id, { ...readCodexAccounts(root, vm.id)[0], refresh_token: 'rotated-rt' })
     await importManagedCodex(root, getVm(root, vm.id), credential)

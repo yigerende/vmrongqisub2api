@@ -14,7 +14,8 @@ import {
   CHATGPT_RESET_CREDITS_URL,
   CHATGPT_RESET_CONSUME_URL,
 } from '../../src/lib/oauth/openai-quota.mjs'
-import { persistCodexQuotaSnapshot } from '../../src/lib/vm/codex-slot.mjs'
+import { persistCodexQuotaSnapshot, readCodexAccounts, upsertCodexAccount } from '../../src/lib/vm/codex-slot.mjs'
+import { tryAcquireOpenAISlot } from '../../src/lib/pool/openai-account-runtime.mjs'
 import {
   evaluateOpenAIQuotaGate,
   effectiveOpenAIPolicy,
@@ -158,6 +159,49 @@ function writeGptSlot(root, id = 'vm-codex-01') {
       accounts: [{ id: 'codex', access_token: 'at', refresh_token: 'rt', chatgpt_account_id: 'acc-1' }],
     }),
   )
+}
+
+for (const guestRotates of [false, true]) {
+  test(`managed quota reads preserve request admission (guest refresh: ${guestRotates})`, async (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-managed-quota-'))
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+    const id = 'vm-codex-01'
+    writeGptSlot(root, id)
+    const file = path.join(root, 'vms', `${id}.json`)
+    const vm = JSON.parse(fs.readFileSync(file, 'utf8'))
+    Object.assign(vm, { execution_mode: 'docker_per_slot', status: 'running', schedulable: true })
+    fs.writeFileSync(file, JSON.stringify(vm))
+    let usageCalls = 0
+    let admitted = 0
+    const result = await queryOpenaiQuota({
+      projectRoot: root,
+      vmId: id,
+      fetchImpl: async (url, init) => {
+        const lease = tryAcquireOpenAISlot(id)
+        if (lease) {
+          admitted++
+          lease.release()
+        }
+        if (url === CHATGPT_RESET_CREDITS_URL) return { status: 200, json: async () => ({ credits: [] }) }
+        assert.equal(url, CHATGPT_USAGE_URL, 'quota reads must not refresh credentials on the host')
+        usageCalls++
+        if (guestRotates && usageCalls === 1) {
+          upsertCodexAccount(root, id, { access_token: 'guest-at', refresh_token: 'guest-rt' })
+          return { status: 401, json: async () => ({}) }
+        }
+        assert.equal(init.headers.authorization, `Bearer ${guestRotates ? 'guest-at' : 'at'}`)
+        return {
+          status: 200,
+          json: async () => ({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18000 } } }),
+        }
+      },
+    })
+    assert.equal(result.ok, true)
+    assert.equal(usageCalls, guestRotates ? 2 : 1)
+    assert.equal(admitted, usageCalls + 1, 'requests remain admissible throughout the quota probe')
+    assert.equal(readCodexAccounts(root, id)[0].refresh_token, guestRotates ? 'guest-rt' : 'rt')
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).schedulable, true)
+  })
 }
 
 test('queryOpenaiQuota persists 5h/7d extra and reset credits', async () => {
