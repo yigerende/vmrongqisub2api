@@ -66,7 +66,7 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     await importManagedCodex(root, vm, credential)
     const health = await ensureManagedKernel(managedExec(root, getVm(root, vm.id)))
     assert.equal(health.ok, true)
-    assert.match(docker('top', vm.container_name, '-eo', 'args'), /kin-codex-kernel/)
+    assert.match(docker('top', vm.container_name, '-eo', 'pid,args'), /kin-codex-kernel/)
     const info = JSON.parse(docker('inspect', vm.container_name))[0]
     assert.equal(info.HostConfig.Privileged, false)
     assert.equal(info.HostConfig.NetworkMode, 'bridge')
