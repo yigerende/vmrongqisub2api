@@ -24,7 +24,7 @@ import { streamCodexKernel } from '../transport/codex-kernel-client.mjs'
 import { ensureCodexKernel, writeCodexKernelConfig } from '../transport/codex-kernel-supervisor.mjs'
 import { boundProxyUrl, isLocalEgressProxy } from '../vm/egress.mjs'
 import { hostProxyUrlForVm } from '../vm/slot-host.mjs'
-import { readCodexAccounts, upsertCodexAccount } from '../vm/codex-slot.mjs'
+import { readCodexAccounts, summarizeCodexSlot, upsertCodexAccount } from '../vm/codex-slot.mjs'
 import {
   CODEX_APP_VERSION,
   CODEX_CATALOG_ORIGINATOR,
@@ -170,7 +170,10 @@ export function pickCodexCandidates(
     if (!vm || !isCodexVm(vm)) return { error: 'platform_mismatch', pin, ids: [] }
     if (!keyAllowsVm(scope, vm)) return { error: 'key_group_mismatch', pin, ids: [] }
     if (!codexSlotAllowsModel(vm, model)) return { error: 'model_not_allowed', pin, ids: [] }
-    const ordered = orderCodexSessionSlots([vm], {
+    // has_token is derived by listVms, not persisted in the raw getVm record.
+    // Pinned probes need the same credential presence check as ordinary requests.
+    const candidate = { ...vm, has_token: summarizeCodexSlot(projectRoot, vm).has_token }
+    const ordered = orderCodexSessionSlots([candidate], {
       pin,
       excluded,
       quotaPolicy: routingPolicy,
@@ -839,6 +842,15 @@ function rejectCodexAdmission({ res, json, stats, logBag, picked, model }) {
   if (picked.error === 'quota_exhausted') {
     return json(res, 503, {
       error: { type: 'api_error', code: 'quota_exhausted', message: 'OpenAI 号池额度已耗尽' },
+    })
+  }
+  if (picked.error === 'slot_unavailable') {
+    return json(res, 503, {
+      error: {
+        type: 'api_error',
+        code: 'slot_unavailable',
+        message: '指定的 GPT 容器槽位未运行或尚未授权，请检查该槽位的容器和凭证状态',
+      },
     })
   }
   return json(res, 503, {
