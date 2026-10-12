@@ -2568,48 +2568,64 @@ export function createPanelHandler(ctx) {
         if (active === id && listVms(cfg.paths.project).some((vm) => vm.id !== id)) {
           return json(res, 409, { ok: false, error: { message: 'cannot delete active VM, switch active first' } })
         }
-        const vm = getVm(cfg.paths.project, id)
-        if (denyIfUserCannotDeleteVm(req, res, vm, json)) return true
-        try {
-          if (vm) {
-            const gone = await destroySlot(vm)
-            // A node slot that could not be removed keeps running there with the account's credential.
-            if (!gone.ok && slotHost(vm).kind === 'node') {
-              return json(res, 409, {
-                ok: false,
-                error: { code: gone.code || 'remote_destroy_failed', message: gone.error || 'remote destroy failed' },
-              })
+        return await withVmLock(vmPath, async () => {
+          const vm = getVm(cfg.paths.project, id)
+          if (!vm) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
+          if (denyIfUserCannotDeleteVm(req, res, vm, json)) return true
+          const hostCodex = isCodexVm(vm) && slotHost(vm).kind === 'local'
+          if (hostCodex)
+            patchVmRecord(cfg.paths.project, id, {
+              status: 'deleting',
+              schedulable: false,
+              schedule_disabled_reason: 'deleting',
+            })
+          try {
+            if (vm) {
+              const gone = await destroySlot(vm, cfg.paths.project)
+              // A node slot that could not be removed keeps running there with the account's credential.
+              if (!gone.ok && (hostCodex || slotHost(vm).kind === 'node')) {
+                return json(res, 409, {
+                  ok: false,
+                  error: { code: gone.code || 'remote_destroy_failed', message: gone.error || 'remote destroy failed' },
+                })
+              }
             }
+          } catch (error) {
+            if (hostCodex)
+              return json(res, 500, {
+                ok: false,
+                error: { code: error.code || 'destroy_failed', message: error.message },
+              })
           }
-        } catch {}
-        // detach this VM only — do not unbind other slots sharing the SOCKS5
-        try {
-          proxyPool.unbindVm(id)
-        } catch {}
-        // remove cli-home
-        try {
-          fs.rmSync(path.join(cfg.paths.project, 'vms', id), { recursive: true, force: true })
-        } catch {}
-        fs.unlinkSync(vmPath)
-        if (active === id) {
-          clearActiveVm(cfg.paths.project)
+          // detach this VM only — do not unbind other slots sharing the SOCKS5
           try {
-            clearActiveVmFromDb()
+            proxyPool.unbindVm(id)
           } catch {}
+          // remove cli-home
           try {
-            reloadActiveVm(cfg)
+            fs.rmSync(path.join(cfg.paths.project, 'vms', id), { recursive: true, force: true })
           } catch {}
-        }
-        // drop the DB credential mirror row too
-        try {
-          removeVmFromDb(id)
-        } catch {}
-        // optional chat side files
-        try {
-          const chat = path.join(cfg.paths.project, 'vms', `${id}-chat.json`)
-          if (fs.existsSync(chat)) fs.unlinkSync(chat)
-        } catch {}
-        return json(res, 200, panel.ok({ deleted: id }))
+          fs.unlinkSync(vmPath)
+          if (active === id) {
+            clearActiveVm(cfg.paths.project)
+            try {
+              clearActiveVmFromDb()
+            } catch {}
+            try {
+              reloadActiveVm(cfg)
+            } catch {}
+          }
+          // drop the DB credential mirror row too
+          try {
+            removeVmFromDb(id)
+          } catch {}
+          // optional chat side files
+          try {
+            const chat = path.join(cfg.paths.project, 'vms', `${id}-chat.json`)
+            if (fs.existsSync(chat)) fs.unlinkSync(chat)
+          } catch {}
+          return json(res, 200, panel.ok({ deleted: id }))
+        })
       }
       // POST /api/panel/vms/:id/reset — destroy container + home, recreate same slot
       if (req.method === 'POST' && /^\/api\/panel\/vms\/[^/]+\/reset$/.test(p)) {
@@ -2620,7 +2636,16 @@ export function createPanelHandler(ctx) {
         return await withVmLock(vmPath, async () => {
           if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
           const prev = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-          const gone = await destroySlot(prev)
+          const hostCodex = isCodexVm(prev) && slotHost(prev).kind === 'local'
+          // Explicit reset stops the old process immediately; there is no request drain.
+          // Persist the state so concurrent requests cannot relaunch it while files are replaced.
+          if (hostCodex)
+            patchVmRecord(cfg.paths.project, id, {
+              status: 'rebuilding',
+              schedulable: false,
+              schedule_disabled_reason: 'rebuilding',
+            })
+          const gone = await destroySlot(prev, cfg.paths.project)
           if (!gone.ok) {
             return json(res, 500, { ok: false, error: { message: gone.error || 'destroy failed', code: gone.code } })
           }
@@ -2651,7 +2676,11 @@ export function createPanelHandler(ctx) {
               destroyed: gone.action,
             })
           }
-          const boot = await startSlotReady(vm, cfg.paths.project, { recreate: true, routing: ctx.routingConfig })
+          const routing = hostCodex
+            ? { ...ctx.routingConfig, inference: { ...ctx.routingConfig?.inference, eager_start: false } }
+            : ctx.routingConfig
+          // Boot the empty container; a later verification/request starts the fresh GPT kernel.
+          const boot = await startSlotReady(vm, cfg.paths.project, { recreate: true, routing })
           if (!boot.ok) {
             vm =
               patchVmRecord(cfg.paths.project, id, {
@@ -2659,7 +2688,7 @@ export function createPanelHandler(ctx) {
                 schedulable: false,
                 schedule_disabled_reason: boot.error || 'runtime start failed',
               }) || vm
-            if (gone.action !== 'absent') {
+            if (hostCodex || gone.action !== 'absent') {
               return json(res, 500, {
                 ok: false,
                 error: { message: boot.error || 'runtime start failed', code: boot.code },
@@ -3352,7 +3381,7 @@ export function createPanelHandler(ctx) {
         const vmPath = path.join(cfg.paths.project, 'vms', `${id}.json`)
         if (!fs.existsSync(vmPath)) return json(res, 404, { ok: false, error: { message: 'vm not found' } })
         const vm = JSON.parse(fs.readFileSync(vmPath, 'utf8'))
-        const halt = await stopSlot(vm)
+        const halt = await stopSlot(vm, cfg.paths.project)
         if (!halt.ok) return json(res, 500, { ok: false, error: { message: halt.error || 'runtime stop failed' } })
         vm.status = 'stopped'
         vm.schedulable = false

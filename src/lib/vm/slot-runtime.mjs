@@ -42,6 +42,7 @@ export async function startSlotReady(vm, projectRoot, opts = {}) {
   if (isCodexVm(vm)) {
     if (!slotHost(vm).supports('codex')) return unsupportedOnHost('codex')
     const boot = await startSlot(vm, projectRoot, opts)
+    if (!boot?.ok) return boot
     const kernel = await ensureSlotInferenceRuntime(vm, projectRoot, opts)
     if (!kernel.ok) return kernel
     return { ok: true, engine: 'codex', docker: boot, kernel }
@@ -51,13 +52,20 @@ export async function startSlotReady(vm, projectRoot, opts = {}) {
   return attachInferenceRuntime(boot, vm, projectRoot, opts)
 }
 
-export async function stopSlot(vm) {
-  if (isCodexVm(vm)) stopCodexKernel(vm.id)
+export async function stopSlot(vm, projectRoot) {
+  if (isCodexVm(vm) && !managedCodex(vm) && slotHost(vm).kind === 'local') {
+    const stopped = await stopCodexKernel(vm.id, { projectRoot })
+    if (!stopped.ok) return stopped
+  }
   return slotHost(vm).stop(vm)
 }
 
 /** Destroy the slot container. Used only by explicit reset / delete. */
-export async function destroySlot(vm) {
+export async function destroySlot(vm, projectRoot) {
+  if (isCodexVm(vm) && !managedCodex(vm) && slotHost(vm).kind === 'local') {
+    const stopped = await stopCodexKernel(vm.id, { projectRoot })
+    if (!stopped.ok) return stopped
+  }
   return slotHost(vm).destroy(vm)
 }
 

@@ -229,6 +229,7 @@ function ingestCodexHop(projectRoot, vmId, result, now = Date.now(), policy = nu
 function execFor(projectRoot, vm) {
   return {
     vmId: vm.id,
+    vmPath: path.join(projectRoot, 'vms', `${vm.id}.json`),
     homeDir: path.join(projectRoot, 'vms', vm.id, 'cli-home'),
     vm,
   }

@@ -87,19 +87,7 @@ const LOCAL_HOST = Object.freeze({
   setProxyEgressEnabled: async (vm, projectRoot, enabled) => {
     if (isCodexVm(vm)) {
       if (enabled) return { ok: true }
-      const child = stopCodexKernel(vm.id)
-      if (!child || child.exitCode !== null || child.signalCode !== null) return { ok: true }
-      return new Promise((resolve) => {
-        const exited = () => {
-          clearTimeout(timeout)
-          resolve({ ok: true })
-        }
-        const timeout = setTimeout(() => {
-          child.off('exit', exited)
-          resolve({ ok: false, error: 'codex_stop_timeout' })
-        }, 2000)
-        child.once('exit', exited)
-      })
+      return stopCodexKernel(vm.id, { projectRoot })
     }
     if (enabled) return ensureProxyEgress(projectRoot, vm.proxy)
     const stopped = stopEgressProcess(projectRoot, vm.proxy?.id)

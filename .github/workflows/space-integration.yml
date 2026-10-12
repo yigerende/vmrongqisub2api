@@ -26,3 +26,5 @@ jobs:
         env:
           KIN_DOCKER_TEST: '1'
         run: node --test test/e2e/managed-codex.docker.mjs
+      - name: Verify legacy GPT reset and host kernel cleanup
+        run: sudo env KIN_DOCKER_TEST=1 "$(command -v node)" --test test/e2e/codex-reset.docker.mjs
