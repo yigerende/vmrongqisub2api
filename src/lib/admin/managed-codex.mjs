@@ -36,22 +36,49 @@ function boundProxy(proxyPool, id) {
   return proxyPool.snapshot().proxies.find((proxy) => proxy.bound_vm_ids.includes(id))
 }
 
-function bindManagedLocalProxy(proxyPool, id) {
+function bindManagedProxy(proxyPool, id, proxyId) {
   if (!proxyPool) throw containerError('proxy_pool_unavailable', '代理池不可用', 503)
   const existing = boundProxy(proxyPool, id)
-  if (existing && existing.id !== 'px-local')
+  if (existing && existing.id !== proxyId)
     throw containerError('proxy_binding_conflict', '槽位已绑定其他代理，请先检查出口配置')
   // Use the same binding limits and enabled checks as panel-created slots.
-  // Never fall back to an arbitrary proxy when the requested local exit is unavailable.
-  const result = proxyPool.bind('px-local', id)
+  // Never fall back to an arbitrary proxy when the requested exit is unavailable.
+  const result = proxyPool.bind(proxyId, id)
   if (!result.ok) {
     const message =
       result.error === 'proxy_bind_limit'
-        ? `本地代理绑定数已达上限（${result.max}），请调整代理池绑定上限或释放槽位`
-        : `无法绑定本地代理：${result.error}`
+        ? `代理绑定数已达上限（${result.max}），请调整代理池绑定上限或释放槽位`
+        : `无法绑定代理：${result.error}`
     throw containerError(result.error, message)
   }
   return proxyPool.getProxyForVm(id)
+}
+
+function selectManagedProxy(proxyPool, body) {
+  if (!proxyPool) throw containerError('proxy_pool_unavailable', '代理池不可用', 503)
+  if (
+    body.proxy_ids != null &&
+    (!Array.isArray(body.proxy_ids) || body.proxy_ids.some((id) => typeof id !== 'string' || !id.trim()))
+  )
+    throw containerError('invalid_proxy_ids', '代理列表必须为代理 ID 数组', 400)
+  const selected = new Set((body.proxy_ids || []).map((id) => id.trim()))
+  if (!selected.size) return String(body.proxy_id || 'px-local').trim()
+  const available = proxyPool
+    .snapshot()
+    .proxies.filter(
+      (p) =>
+        selected.has(p.id) &&
+        p.enabled &&
+        !p.blocked_reason &&
+        !['dead', 'fail'].includes(p.status) &&
+        Number.isInteger(p.bound_count) &&
+        p.bound_count >= 0 &&
+        p.bound_count < p.bind_limit,
+    )
+  if (!available.length) throw containerError('proxy_unavailable', '所选代理均不可用或已达到绑定上限，已停止推送')
+  const min = Math.min(...available.map((p) => p.bound_count))
+  const candidates = available.filter((p) => p.bound_count === min)
+  return candidates[crypto.randomInt(candidates.length)].id
 }
 
 // Repair old Space slots that recorded px-local only in vm.json. This runs before
@@ -64,7 +91,7 @@ export function reconcileManagedCodexProxies(root, proxyPool) {
     // to the operator. Neither should be overridden during an upgrade.
     if (boundProxy(proxyPool, vm.id)) continue
     try {
-      bindVmProxy(root, vm.id, bindManagedLocalProxy(proxyPool, vm.id))
+      bindVmProxy(root, vm.id, bindManagedProxy(proxyPool, vm.id, 'px-local'))
       result.repaired.push(vm.id)
     } catch (error) {
       result.failed.push({ vm_id: vm.id, error: error.code || error.message })
@@ -95,13 +122,8 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
     if (!vm) {
       const email = String(body.account_email || '').trim()
       if (!email || email.length > 254) throw containerError('invalid_email', '需要账号邮箱', 400)
-      if (
-        body.platform !== 'openai' ||
-        body.runtime_type !== 'docker' ||
-        body.node_id ||
-        body.proxy_id !== 'px-local'
-      ) {
-        throw containerError('invalid_runtime', '集成槽位必须为本机 GPT Docker，使用本地出口', 400)
+      if (body.platform !== 'openai' || body.runtime_type !== 'docker' || body.node_id) {
+        throw containerError('invalid_runtime', '集成槽位必须为本机 GPT Docker', 400)
       }
       const kernel = body.kernel || 'ubuntu-24.04'
       if (!OS_CATALOG[kernel]) throw containerError('invalid_kernel', '系统不支持', 400)
@@ -129,7 +151,7 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
         runtime: { type: 'docker' },
         machine: resolveMachineSpec({ config: routing.vm, overrides: body.machine, runtime: 'docker' }),
         fingerprint: generateWorkstationFingerprint({ id, kernel, locale }),
-        proxy: { id: 'px-local', scheme: 'local', host: 'local' },
+        proxy: { id: selectManagedProxy(proxyPool, body) },
         policy: {},
         codex: {},
         status: 'creating',
@@ -141,9 +163,13 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
       }
     }
     if (vm.status === 'deleting') throw containerError('slot_deleting')
-    if (vm.proxy?.id !== 'px-local')
-      throw containerError('proxy_binding_conflict', '集成槽位需要绑定本地代理，请先检查出口配置')
-    const proxy = bindManagedLocalProxy(proxyPool, id)
+    if (!vm.proxy?.id) throw containerError('proxy_binding_conflict', '集成槽位已解绑代理，请先检查出口配置')
+    // Selection and reservation are synchronous, before the first Docker await:
+    // concurrent pushes from either Space instance see the updated binding count.
+    // Existing assignments retain their exit even if candidates/counts changed.
+    const proxy = bindManagedProxy(proxyPool, id, vm.proxy.id)
+    vm.proxy = proxy
+    vm.proxy_cli_enabled = true
     if (isNew) {
       try {
         fs.mkdirSync(path.join(root, 'vms'), { recursive: true })

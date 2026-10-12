@@ -12,6 +12,7 @@ import { slotMemory } from './machine-spec.mjs'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { openAIRuntimeSignals, blockOpenAISlot } from '../pool/openai-account-runtime.mjs'
+import { boundProxyUrl, isLocalEgressProxy } from './egress.mjs'
 
 const execFileAsync = promisify(execFile)
 const starting = new Map()
@@ -80,7 +81,10 @@ function paths(root, id) {
   }
 }
 export function writeManagedConfig(root, vm) {
-  assertManagedWritable(root, vm)
+  vm = assertManagedWritable(root, vm)
+  const local = isLocalEgressProxy(vm.proxy)
+  const proxyUrl = local ? '' : boundProxyUrl(vm.proxy)
+  if (!local && !proxyUrl) throw containerError('proxy_required', '槽位未绑定可用代理')
   const p = paths(root, vm.id)
   fs.mkdirSync(p.run, { recursive: true, mode: 0o700 })
   const tokenPath = path.join(p.run, 'internal.token')
@@ -93,8 +97,8 @@ export function writeManagedConfig(root, vm) {
       socket_path: '/slot/run/codex-kernel.sock',
       credential_path: '/slot/codex-credentials.json',
       internal_token: fs.readFileSync(tokenPath, 'utf8').trim(),
-      proxy_url: '',
-      proxy_required: false,
+      proxy_url: proxyUrl,
+      proxy_required: !local,
       max_request_bytes: 32 * 1024 * 1024,
     },
     { mode: 0o600 },

@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import net from 'node:net'
 import { execFileSync } from 'node:child_process'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { createManagedCodex, importManagedCodex, handleManagedCodex } from '../../src/lib/admin/managed-codex.mjs'
@@ -16,6 +17,43 @@ import { imageForKernel } from '../../src/lib/vm/os-catalog.mjs'
 import { queryOpenaiQuota, CHATGPT_USAGE_URL } from '../../src/lib/oauth/openai-quota.mjs'
 import { tryAcquireOpenAISlot, openAIRuntimeSignals } from '../../src/lib/pool/openai-account-runtime.mjs'
 import { ProxyPool } from '../../src/lib/vm/proxy-pool.mjs'
+import { streamCodexKernel } from '../../src/lib/transport/codex-kernel-client.mjs'
+
+// Records SOCKS destinations, then refuses them: no test traffic reaches OpenAI.
+async function refusingSocks() {
+  const destinations = []
+  const sockets = new Set()
+  const server = net.createServer((socket) => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+    socket.on('error', () => {})
+    let buffered = Buffer.alloc(0)
+    let greeted = false
+    socket.on('data', (chunk) => {
+      buffered = Buffer.concat([buffered, chunk])
+      if (!greeted) {
+        if (buffered.length < 2 || buffered.length < 2 + buffered[1]) return
+        buffered = buffered.subarray(2 + buffered[1])
+        greeted = true
+        socket.write(Buffer.from([5, 0]))
+      }
+      if (buffered.length < 5) return
+      const size = buffered[3] === 3 ? 7 + buffered[4] : buffered[3] === 1 ? 10 : 22
+      if (buffered.length < size) return
+      destinations.push(buffered[3] === 3 ? buffered.subarray(5, 5 + buffered[4]).toString() : 'ip')
+      socket.end(Buffer.from([5, 5, 0, 1, 0, 0, 0, 0, 0, 0]))
+    })
+  })
+  await new Promise((resolve) => server.listen(0, '0.0.0.0', resolve))
+  return {
+    port: server.address().port,
+    destinations,
+    close: async () => {
+      for (const socket of sockets) socket.destroy()
+      await new Promise((resolve) => server.close(resolve))
+    },
+  }
+}
 
 test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and deletion', {
   skip: process.env.KIN_DOCKER_TEST !== '1',
@@ -40,6 +78,7 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
   }
   let vm
   let other
+  let socks
   const call = async (method, action, body = {}) => {
     let out
     await handleManagedCodex({
@@ -153,13 +192,32 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     })
     assert.equal(getVm(root, vm.id).schedulable, false)
     assert.equal((await inspectManagedContainer(vm)).id, a.container.id)
+    socks = await refusingSocks()
+    const gateway = JSON.parse(docker('network', 'inspect', 'bridge'))[0].IPAM.Config[0].Gateway
+    const chosenProxy = proxyPool.importLines(`${gateway}:${socks.port}`).items[0].id
     const second = await create({
       ...input,
       assignment_id: `space-${crypto.randomBytes(24).toString('hex')}`,
+      proxy_ids: [chosenProxy],
     })
     other = getVm(root, second.vm.id)
     assert.notEqual(other.container_name, vm.container_name)
     assert.notEqual(other.fingerprint.device_id, vm.fingerprint.device_id)
+    await importManagedCodex(root, other, credential)
+    const guestConfig = JSON.parse(docker('exec', other.container_name, 'cat', '/slot/run/codex-kernel.json'))
+    assert.equal(guestConfig.proxy_url, `socks5h://${gateway}:${socks.port}`)
+    assert.equal(guestConfig.proxy_required, true)
+    const proxyFailure = await streamCodexKernel({
+      exec: managedExec(root, getVm(root, other.id)),
+      envelope: { body: { model: 'gpt-5.1-codex', input: 'fixture', stream: true }, headers: {}, stream: true },
+      timeoutMs: 5000,
+      onEvent: async () => {},
+    })
+    assert.equal(proxyFailure.ok, false)
+    assert.ok(
+      socks.destinations.includes('chatgpt.com'),
+      'the real guest kernel must dial through the chosen SOCKS proxy',
+    )
     const originalName = vm.container_name
     const activeAtDelete = tryAcquireOpenAISlot(vm.id)
     assert.ok(activeAtDelete)
@@ -170,7 +228,7 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
       patchVmRecord(root, vm.id, { container_name: originalName })
       assert.equal((await call('DELETE', '')).status, 200, 'delete must not wait for active requests')
       assert.equal(proxyPool.getProxyForVm(vm.id), null, 'successful deletion releases the local binding')
-      assert.equal(proxyPool.getProxyForVm(other.id).id, 'px-local', 'other slots retain their bindings')
+      assert.equal(proxyPool.getProxyForVm(other.id).id, chosenProxy, 'other slots retain their bindings')
       assert.equal(openAIRuntimeSignals(vm.id).inFlight, 1, 'the held request has not drained')
     } finally {
       activeAtDelete.release()
@@ -200,6 +258,7 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     }
     throw error
   } finally {
+    await socks?.close()
     for (const name of [vm?.container_name, other?.container_name, sentinel].filter(Boolean)) {
       try {
         docker('rm', '-f', name)

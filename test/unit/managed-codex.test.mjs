@@ -4,7 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { accountContainerName, assertManagedWritable } from '../../src/lib/vm/codex-container.mjs'
+import { accountContainerName, assertManagedWritable, writeManagedConfig } from '../../src/lib/vm/codex-container.mjs'
 import {
   createManagedCodex,
   handleManagedCodex,
@@ -56,6 +56,15 @@ function legacySlot(root, id, extra = {}) {
   fs.mkdirSync(path.join(root, 'vms'), { recursive: true })
   fs.writeFileSync(path.join(root, 'vms', `${id}.json`), JSON.stringify(vm))
   return vm
+}
+
+function failDocker(t, root) {
+  const previous = process.env.KIN_DOCKER_BIN
+  process.env.KIN_DOCKER_BIN = path.join(root, 'nonexistent-docker')
+  t.after(() => {
+    if (previous === undefined) delete process.env.KIN_DOCKER_BIN
+    else process.env.KIN_DOCKER_BIN = previous
+  })
 }
 
 test('account names are Docker-safe and a new cycle has a unique name', () => {
@@ -126,12 +135,7 @@ test('create refuses an unavailable local proxy before creating a slot or touchi
 
 test('an interrupted Docker create keeps one durable local binding for the same assignment', async (t) => {
   const { root, proxyPool } = environment(t)
-  const previous = process.env.KIN_DOCKER_BIN
-  process.env.KIN_DOCKER_BIN = path.join(root, 'nonexistent-docker')
-  t.after(() => {
-    if (previous === undefined) delete process.env.KIN_DOCKER_BIN
-    else process.env.KIN_DOCKER_BIN = previous
-  })
+  failDocker(t, root)
   const body = input()
   const id = assignmentId(body)
   for (let retry = 0; retry < 2; retry++) {
@@ -142,6 +146,65 @@ test('an interrupted Docker create keeps one durable local binding for the same 
     const reopened = new ProxyPool({ db: proxyPool.db })
     assert.deepEqual(reopened.snapshot().proxies.find((p) => p.id === 'px-local').bound_vm_ids, [id])
   }
+})
+
+test('concurrent pushes balance current counts only across selected available proxies and pin retries', async (t) => {
+  const { root, proxyPool } = environment(t)
+  failDocker(t, root)
+  const [a, b, disabled] = proxyPool.importLines('10.0.0.1:1080\n10.0.0.2:1080\n10.0.0.3:1080').items.map((p) => p.id)
+  proxyPool.bind(a, 'existing-a')
+  proxyPool.bind(a, 'existing-b')
+  proxyPool.setEnabled(disabled, false)
+  const bodies = Array.from({ length: 6 }, () => ({ ...input(), proxy_ids: [a, a, b, disabled, 'missing'] }))
+  await Promise.all(
+    bodies.map((body) => assert.rejects(createManagedCodex(root, body, {}, proxyPool), { code: 'docker_failed' })),
+  )
+  const proxies = proxyPool.snapshot().proxies
+  assert.equal(proxies.find((p) => p.id === a).bound_count, 4)
+  assert.equal(proxies.find((p) => p.id === b).bound_count, 4)
+  assert.equal(proxies.find((p) => p.id === 'px-local').bound_count, 0)
+  const first = getVm(root, assignmentId(bodies[0]))
+  assert.equal(first.proxy.id, b, 'first push must select the uniquely least-bound proxy')
+  await assert.rejects(createManagedCodex(root, { ...bodies[0], proxy_ids: ['px-local'] }, {}, proxyPool), {
+    code: 'docker_failed',
+  })
+  assert.equal(getVm(root, first.id).proxy.id, b, 'ambiguous retries must keep the original exit')
+  assert.equal(proxyPool.snapshot().proxies.find((p) => p.id === b).bound_count, 4)
+})
+
+test('unavailable selected proxies never fall back to local; empty selection uses local', async (t) => {
+  const { root, proxyPool } = environment(t)
+  failDocker(t, root)
+  const selected = proxyPool.importLines('10.0.0.1:1080').items[0].id
+  proxyPool.updateConfig({ bind_limit: 1 })
+  proxyPool.bind(selected, 'full-slot')
+  const body = { ...input(), proxy_ids: [selected, 'missing'] }
+  await assert.rejects(createManagedCodex(root, body, {}, proxyPool), { code: 'proxy_unavailable' })
+  assert.equal(getVm(root, assignmentId(body)), null)
+  await assert.rejects(createManagedCodex(root, { ...body, proxy_ids: 'bad' }, {}, proxyPool), {
+    code: 'invalid_proxy_ids',
+  })
+  await assert.rejects(createManagedCodex(root, { ...body, proxy_ids: [] }, {}, proxyPool), { code: 'docker_failed' })
+  assert.equal(getVm(root, assignmentId(body)).proxy.id, 'px-local')
+})
+
+test('guest kernel uses persisted SOCKS credentials, requires the proxy, and refuses an unbound exit', (t) => {
+  const { root, proxyPool } = environment(t)
+  const vm = legacySlot(root, 'space-config')
+  writeManagedConfig(root, vm)
+  const configFile = path.join(root, 'vms', vm.id, 'run', 'codex-kernel.json')
+  let config = JSON.parse(fs.readFileSync(configFile, 'utf8'))
+  assert.equal(config.proxy_url, '')
+  assert.equal(config.proxy_required, false)
+  const proxy = proxyPool.importLines('socks5://a%40b:p%3Ass@10.0.0.1:1080').items[0]
+  proxyPool.bind(proxy.id, vm.id)
+  bindVmProxy(root, vm.id, proxyPool.getProxyForVm(vm.id))
+  writeManagedConfig(root, vm) // stale caller snapshot must not restore direct egress
+  config = JSON.parse(fs.readFileSync(configFile, 'utf8'))
+  assert.equal(config.proxy_url, 'socks5h://a%40b:p%3Ass@10.0.0.1:1080')
+  assert.equal(config.proxy_required, true)
+  bindVmProxy(root, vm.id, null)
+  assert.throws(() => writeManagedConfig(root, vm), { code: 'proxy_required' })
 })
 
 test('failure to save a new slot releases its reservation without unbinding other slots', async (t) => {

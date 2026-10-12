@@ -1006,7 +1006,13 @@ export function createPanelHandler(ctx) {
         return json(
           res,
           200,
-          panel.ok({ version: 1, docker_per_slot: true, account_container_names: true, delete_account: true }),
+          panel.ok({
+            version: 1,
+            docker_per_slot: true,
+            account_container_names: true,
+            delete_account: true,
+            proxy_selection: true,
+          }),
         )
       }
       if (await handleManagedCodex({ req, res, url, cfg, routing: ctx.routingConfig, proxyPool, readBody, json }))
