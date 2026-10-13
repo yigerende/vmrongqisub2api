@@ -207,6 +207,20 @@ test('parallel detail workers keep every repeated request id on the same writer'
   assert.equal(pool.snapshot().persisted_records, 60)
 })
 
+test('failed worker messaging cannot throw from the serving event loop or discard accepted records', async () => {
+  const worker = new ControlledWorker()
+  worker.postMessage = () => {
+    throw new Error('test closed message port')
+  }
+  const writer = new LogDetails('unused', { createWorker: () => worker })
+  worker.emit('message', { type: 'ready' })
+  writer.enqueue({ summary: { request_id: 'retained' } })
+  await assert.rejects(writer.flush(), /exited/)
+  assert.equal(writer.queue.length, 1)
+  assert.ok(writer.bytes > 0)
+  await assert.rejects(writer.close(), /exited/)
+})
+
 test('retention cannot delete a newer repeated-id record selected by an earlier cleanup step', (t) => {
   const { store } = fixture(t)
   store.repo.insertDebug('repeat', '2020-01-01T00:00:00Z', { old: true })

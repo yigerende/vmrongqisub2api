@@ -189,7 +189,7 @@ export class LogDetails {
         void this.worker?.terminate()
       }, 120000)
       this.maintenanceTimer.unref()
-      this.worker.postMessage({ type: 'cleanup', options: this.maintenance.options })
+      if (!this.send({ type: 'cleanup', options: this.maintenance.options })) return
     }
     // A small window keeps the worker fed while the owner is busy forwarding
     // frames. Retain every unacknowledged batch, in order, for crash replay.
@@ -205,9 +205,22 @@ export class LogDetails {
       const batch = { entries, bytes, sequence: entries.at(-1).sequence }
       this.batches.push(batch)
       this.worker.ref()
-      this.worker.postMessage({ id: batch.sequence, jobs: entries.map((entry) => entry.job) })
+      if (!this.send({ id: batch.sequence, jobs: entries.map((entry) => entry.job) })) return
     }
     if (!inFlight && this.batches.length) this.armTimeout()
+  }
+
+  send(message) {
+    const worker = this.worker
+    try {
+      worker.postMessage(message)
+      return true
+    } catch (error) {
+      this.ready = false
+      this.warn('detail worker message failed', error.message)
+      void worker.terminate() // Exit handler replays only after the old writer is gone.
+      return false
+    }
   }
 
   cleanup(options) {
