@@ -1,8 +1,10 @@
+import { writeStreamChunk } from '../http/stream-write.mjs'
+import { schedulingSnapshot } from '../vm/scheduling-snapshot.mjs'
 /**
  * Codex hop from handle-protocol. Claude convert/pool/CRS never runs here.
  */
 import path from 'node:path'
-import { getVm, listVms, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
+import { getVm, listVms, summarizeVm, persistCodexUsage, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
 import { isValidVmId } from '../vm/vm-file.mjs'
 import { isCodexProtocolAllowed, isCodexVm, normalizeCodexRouting } from './codex-route.mjs'
 import { keyAllowsVm, keyScopeFromRequest, vmPoolDenial } from '../admin/key-scope.mjs'
@@ -33,7 +35,13 @@ import {
   makeProxyFetch,
   refreshCodexAccessToken,
 } from './codex-models.mjs'
-import { orderCodexSessionSlots, codexSlotAllowsModel, isCodexFailoverError } from '../pool/codex-slot-pool.mjs'
+import {
+  orderCodexSessionSlots,
+  codexSlotAllowsModel,
+  isCodexFailoverError,
+  codexAccountCandidate,
+  isCodexSlotReady,
+} from '../pool/codex-slot-pool.mjs'
 import {
   reportOpenAIAttempt,
   tryAcquireOpenAISlot,
@@ -180,16 +188,19 @@ export function pickCodexCandidates(
     })
     return { ...ordered, pin, sticky: false, sessionKey: null, stickyKeys: [] }
   }
-  for (const item of listVms(projectRoot, { codex: { quota: routingPolicy } })) {
+  const snapshot = schedulingSnapshot(projectRoot)
+  for (const item of snapshot?.raw() || listVms(projectRoot, { codex: { quota: routingPolicy } })) {
     if (!isCodexVm(item)) continue
-    syncCodexQuotaSchedule(projectRoot, getVm(projectRoot, item.id) || item, {
+    syncCodexQuotaSchedule(projectRoot, snapshot ? item : getVm(projectRoot, item.id) || item, {
       policy: routingPolicy,
     })
   }
   const stickyKeys = stickyRouter?.collectPoolKeys?.(req, body || {}, { platform: 'openai' }) || []
   const sessionKey = stickyRouter?.extractPoolKey?.(req, body || {}, { platform: 'openai' }) || stickyKeys[0] || null
   const bound = sessionKey ? stickyRouter?.resolve?.(sessionKey) : null
-  const vms = listVms(projectRoot, { codex: { quota: routingPolicy } }).filter((vm) => keyAllowsVm(scope, vm))
+  const vms = (
+    snapshot?.list({ codex: { quota: routingPolicy } }) || listVms(projectRoot, { codex: { quota: routingPolicy } })
+  ).filter((vm) => keyAllowsVm(scope, vm))
   const continuesResponse = !!body?.previous_response_id && !!bound?.vmId
   if (scope.vm_pool_id && vms.length === 0 && !continuesResponse) {
     return { error: 'vm_pool_unavailable', message: '账号池没有可调度的 GPT 槽位', ids: [], candidates: [] }
@@ -328,7 +339,34 @@ async function admitCodexCandidate(projectRoot, req, opts, { deadline, signal })
     const picked = pickCodexCandidates(projectRoot, req, opts)
     const livePolicy = normalizeCodexRouting(opts.routing?.codex || opts.routing).quota
     if (picked.error && picked.error !== 'capacity_unavailable') return { picked }
-    for (const candidate of picked.candidates || []) {
+    let stale = false
+    for (let candidate of picked.candidates || []) {
+      if (schedulingSnapshot(projectRoot) && !picked.pin) {
+        let vm
+        try {
+          vm = getVm(projectRoot, candidate.id)
+        } catch {}
+        const live = vm ? summarizeVm(vm, projectRoot, opts.routing) : null
+        const fresh = live ? codexAccountCandidate(live, Date.now(), null, livePolicy) : null
+        if (
+          !live ||
+          !isCodexSlotReady(live) ||
+          !keyAllowsVm(keyScopeFromRequest(req), live) ||
+          !codexSlotAllowsModel(live, opts.body?.model) ||
+          fresh.status !== 'normal'
+        ) {
+          schedulingSnapshot(projectRoot).invalidate(candidate.id)
+          stale = true
+          continue
+        }
+        candidate = fresh
+        const claimsWindow = !!picked.sessionKey && (!picked.home || picked.home === candidate.id)
+        if (
+          claimsWindow &&
+          opts.sessions?.canAccept?.(candidate.id, picked.sessionKey, { max: fresh.maxSessions }).ok === false
+        )
+          continue
+      }
       const lease = tryAcquireOpenAISlot(candidate.id, {
         concurrency: candidate.concurrency,
         maxRpm: candidate.maxRpm,
@@ -336,6 +374,7 @@ async function admitCodexCandidate(projectRoot, req, opts, { deadline, signal })
       })
       if (lease) return { picked, vmId: candidate.id, lease }
     }
+    if (stale) continue
     // A woken waiter that still missed hands the wake to the next in line.
     if (woken) wakeOpenAIWaiter()
     const now = Date.now()
@@ -665,11 +704,12 @@ export async function handleCodexProtocol({
                   protocol === 'anthropic.messages'
                     ? responsesSseToAnthropicEvents(line, anthropicSse)
                     : responsesSseToChatChunk(line, 'codex', chatSse)
-                if (mapped) res.write(mapped)
+                if (mapped) await writeStreamChunk(res, mapped)
               } catch (error) {
                 if (error.code !== 'tool_arguments_mismatch') throw error
                 conversionError = { type: 'upstream_protocol_error', code: error.code, message: error.message }
-                res.write(
+                await writeStreamChunk(
+                  res,
                   protocol === 'anthropic.messages'
                     ? `event: error\ndata: ${JSON.stringify({ type: 'error', error: conversionError })}\n\n`
                     : `data: ${JSON.stringify({ error: conversionError })}\n\ndata: [DONE]\n\n`,
@@ -678,7 +718,7 @@ export async function handleCodexProtocol({
               return
             }
             const named = nameSseEvent(line)
-            if (named) res.write(named)
+            if (named) await writeStreamChunk(res, named)
           },
         })
         // The log and total duration share ingress time; pool scoring keeps hop TTFT.

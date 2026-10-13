@@ -557,4 +557,23 @@ curl -sS -X POST http://127.0.0.1:8787/api/panel/wrap-cli/sync \
 
 ---
 
+### 多核处理与源码镜像升级
+
+主控保留唯一的账号调度、并发/RPM、会话绑定、额度和生命周期状态。流读取与解析在无状态工作线程中执行，历史统计、普通请求摘要落库和备份也使用独立线程。Docker、KVM 的槽位内核和出口路径沿用原有配置；Space 无需更新。
+
+仍使用原来的 SQLite 数据目录，启动时自动补充统计索引，无需 PostgreSQL、Redis 或新增服务。源码部署继续拉取自己的 GitHub 仓库，然后按原有 Compose 覆盖文件重建 **vm2api 主控**。镜像会自动包含新的工作线程文件。
+
+`VM2API_STREAM_WORKERS` 控制流线程数（1–64）；Compose 默认为 8，直接 Node 启动按可用 CPU 自动选择，最多 8。它不是槽位并发上限，也不会创建槽位容器。设为 `0` 并重建主控可关闭流线程池；其余统计和 I/O 优化仍然生效。`/health` 的 `stream_runtime` 提供线程数、活动流数和重启数。
+
+主控停机默认等待在途请求最多 120 秒，随后取消请求并收尾。仓库 Compose 已设 `stop_grace_period: 135s`；自行编排需配置同等宽限。修改 `VM2API_DRAIN_TIMEOUT_MS` 时，停机宽限需相应增加。强制杀进程仍可能丢失尚未落库的少量请求摘要；调度/额度计算与调试记录保持在主控执行。
+
+本地可用模拟内核压测，脚本只创建临时数据，不访问真实账号，不操作 Docker/KVM：
+
+```bash
+node scripts/bench-concurrency.mjs --workers=8 --levels=200,400 --seconds=60 --stream-ms=30000 --output=bench-long.json
+node scripts/bench-concurrency.mjs --workers=8 --levels=200,400,500 --seconds=20 --stream-ms=3000 --output=bench-churn.json
+```
+
+两组分别覆盖长时间同时输出和短请求快速周转。脚本使用真实协议处理器、选账号、会话绑定和 Socket/SSE 链路，模拟容器启动与上游；检查请求完成、摘要数量、并发释放、单槽上限和各管理接口 P95（默认目标 1 秒）。`--workers=0` 可对照进程内流处理和同步统计。测试数字取决于 CPU、磁盘、请求长度和历史数据量，不能替代正式环境的真实内核验证。
+
 交流见仓库 [README](../README.md)。

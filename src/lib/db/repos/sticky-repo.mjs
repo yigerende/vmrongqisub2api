@@ -40,6 +40,7 @@ export class StickyRepo {
     this._delete = db.prepare('DELETE FROM sticky_sessions WHERE key = ?')
     this._deleteByAccount = db.prepare('DELETE FROM sticky_sessions WHERE account_id = ? OR vm_id = ?')
     this._purge = db.prepare('DELETE FROM sticky_sessions WHERE expires_at < ?')
+    this._hasExpired = db.prepare('SELECT 1 FROM sticky_sessions WHERE expires_at < ? LIMIT 1')
     this._dropAlias = db.prepare(`
       DELETE FROM sticky_sessions
       WHERE key = 'envelope'
@@ -82,6 +83,9 @@ export class StickyRepo {
   }
 
   purgeExpired(now = Date.now()) {
+    // An empty DELETE still competes for SQLite's write lock. The indexed
+    // existence check leaves expiry/binding semantics unchanged.
+    if (!this._hasExpired.get(now)) return 0
     return this._purge.run(now).changes
   }
 

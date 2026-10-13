@@ -37,6 +37,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import zlib from 'node:zlib'
 import { spawnSync } from 'node:child_process'
+import { Worker } from 'node:worker_threads'
 import { getDb, getDbPath, closeDatabase, openDatabase, vacuumInto } from '../db/database.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { BackupRepo } from '../db/repos/backup-repo.mjs'
@@ -83,6 +84,56 @@ export function tarAvailable() {
 }
 
 export class BackupService {
+  /** Production backup compression/hash/snapshot runs outside the request loop. */
+  async createBackupAsync(options = {}) {
+    if (this._running || this.isRestoring) {
+      throw Object.assign(new Error('backup already in progress'), { code: 'backup_in_progress' })
+    }
+    this._running = true
+    let worker
+    this._backupJob = (async () => {
+      await this.beforeBackup?.()
+      worker = new Worker(new URL('./backup-worker.mjs', import.meta.url), {
+        workerData: {
+          dbPath: getDbPath(),
+          service: {
+            dataDir: this.dataDir,
+            projectRoot: this.projectRoot,
+            configDir: this.configDir,
+            backupDir: this.backupDir,
+            tmpDir: this.tmpDir,
+          },
+          options,
+        },
+      })
+      this._backupWorker = worker
+      return new Promise((resolve, reject) => {
+        worker.once('message', ({ value, error }) => {
+          if (error) reject(Object.assign(new Error(error.message), { code: error.code }))
+          else resolve(value)
+        })
+        worker.once('error', reject)
+        worker.once('exit', (code) => reject(new Error(`backup worker exited before result (${code})`)))
+      })
+    })()
+    try {
+      return await this._backupJob
+    } finally {
+      await worker?.terminate()
+      this._running = false
+      this._backupJob = null
+      this._backupWorker = null
+    }
+  }
+
+  async waitForIdle() {
+    await this._backupJob?.catch(() => {})
+  }
+
+  async cancelActiveBackup() {
+    await this._backupWorker?.terminate()
+  }
+
   constructor({ dataDir, projectRoot, configDir, backupDir, tmpDir, checkIntervalMs = 10 * 60_000 } = {}) {
     this.dataDir = dataDir
     this.projectRoot = projectRoot
@@ -522,10 +573,10 @@ export class BackupService {
   /** Auto-backup checker: every checkIntervalMs + a catch-up run at boot. */
   startScheduler() {
     this.stopScheduler()
-    const check = () => {
+    const check = async () => {
       try {
         if (this.shouldRunScheduled()) {
-          this.createBackup({ kind: 'scheduled' })
+          await this.createBackupAsync({ kind: 'scheduled' })
           console.log('[backup] scheduled backup completed')
         }
       } catch (e) {

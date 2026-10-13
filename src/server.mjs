@@ -1,3 +1,6 @@
+import { startSchedulingSnapshot, stopSchedulingSnapshots } from './lib/vm/scheduling-snapshot.mjs'
+import { startStreamWorkers, streamWorkerPool } from './lib/transport/stream-workers.mjs'
+import { cancelWorkerRequest } from './lib/transport/go-worker-client.mjs'
 /**
  * vm2api — Node control plane.
  * Inference data plane: one long-lived Go slot worker per VM
@@ -72,7 +75,7 @@ import { ensureProxyEgress, proxyEgressReady } from './lib/vm/egress.mjs'
 import { syncIpv6ProxyEgress } from './lib/vm/proxy-policy-runtime.mjs'
 import { GATEWAY_CAPABILITIES } from './lib/vm/execution-context.mjs'
 import { isTelemetryPath, telemetryInterceptResponse } from './lib/identity/telemetry-rewrite.mjs'
-import { openDatabase, closeDatabase, getDb } from './lib/db/database.mjs'
+import { openDatabase, closeDatabase, getDb, getDbPath } from './lib/db/database.mjs'
 import { runLegacyImport } from './lib/db/legacy-import.mjs'
 import { initVmDbSync, stopVmWatch } from './lib/vm/vm-db-sync.mjs'
 import { BackupService } from './lib/admin/backup-service.mjs'
@@ -92,7 +95,7 @@ import { normalizeCredentialMode } from './lib/oauth/credential-mode.mjs'
 import { ensureWorkerCredential } from './lib/transport/go-worker-client.mjs'
 import { stopAllRustKernels } from './lib/transport/rust-kernel-supervisor.mjs'
 import { createRespond, parseRequestUrl } from './lib/http/respond.mjs'
-import { isConsoleEntry, tryServeWebDist } from './lib/http/web-dist.mjs'
+import { isConsoleEntry, tryServeWebDistAsync } from './lib/http/web-dist.mjs'
 import { createRoutingRuntime } from './lib/admin/routing-runtime.mjs'
 import { createImportCommit } from './lib/oauth/import-commit.mjs'
 import { createHandleProtocol } from './lib/protocol/handle-protocol.mjs'
@@ -151,6 +154,7 @@ if (legacyImport?.imported) {
 }
 // VM/credential mirror: write-through hook + startup reconcile + fs.watch
 const vmSync = initVmDbSync(cfg.paths.project)
+startSchedulingSnapshot(cfg.paths.project)
 if (vmSync.upserted || vmSync.rebuilt) {
   console.log(`[db] vm mirror reconciled: upserted=${vmSync.upserted} rebuilt=${vmSync.rebuilt}`)
 }
@@ -316,6 +320,8 @@ requestLog = new RequestLogStore({
   dataDir: cfg.paths.data,
   mode: process.env.KIN_REQUEST_LOG_MODE || routingConfig?.logging?.mode || 'normal',
 })
+requestLog.enableReader(getDbPath())
+requestLog.enableWriter(getDbPath())
 if (routingConfig?.logging) {
   requestLog.setConfig({
     // Env wins at boot so e2e / ops can force off|debug. Panel PUT still hot-updates.
@@ -518,6 +524,7 @@ const backupService = new BackupService({
   projectRoot: cfg.paths.project,
   configDir: path.dirname(routingConfigPath),
 })
+backupService.beforeBackup = () => requestLog.writer?.flush()
 backupService.onRestored((db) => {
   // A restore swaps the DatabaseSync instance and routing files. Rebuild every
   // holder before reporting success; otherwise requests keep stale snapshots
@@ -525,6 +532,7 @@ backupService.onRestored((db) => {
   for (const store of [apiKeyStore, apiEndpointStore, panelUsers, accountQuota, stickyRouter, proxyPool, requestLog]) {
     store.rebind(db)
   }
+  startSchedulingSnapshot(cfg.paths.project)
   groupsRepo = new GroupsRepo(db)
   apiScheduler.reload(apiEndpointStore.listRaw())
 
@@ -913,7 +921,13 @@ const handlePanel = createPanelHandler({
   slotShell,
 })
 
+const streamWorkers = process.env.VM2API_STREAM_WORKERS == null ? undefined : Number(process.env.VM2API_STREAM_WORKERS)
+await startStreamWorkers({ size: streamWorkers, cancel: cancelWorkerRequest })
+
+let activeHandlers = 0
+const connections = new Set()
 const server = http.createServer(async (req, res) => {
+  activeHandlers++
   try {
     if (req.method === 'OPTIONS') {
       res.writeHead(204, {
@@ -956,7 +970,7 @@ const server = http.createServer(async (req, res) => {
       if (handled !== false) return
     }
 
-    if (req.method === 'GET' && tryServeWebDist(res, cfg.paths.project, p)) return
+    if (req.method === 'GET' && (await tryServeWebDistAsync(res, cfg.paths.project, p))) return
     if (req.method === 'GET' && isConsoleEntry(p)) {
       return json(res, 404, { error: { message: 'console not found; run pnpm -C web build' } })
     }
@@ -982,6 +996,7 @@ const server = http.createServer(async (req, res) => {
         capabilities: GATEWAY_CAPABILITIES,
         limitations: LIMITATIONS,
         stats,
+        stream_runtime: streamWorkerPool()?.snapshot() || { workers: 0, active: 0, restarts: 0 },
         health_probe: healthMonitor?.getSnapshot?.() || null,
         api_kernel: {
           ...apiKernelSnapshot(cfg),
@@ -1072,7 +1087,14 @@ const server = http.createServer(async (req, res) => {
         res.end()
       } catch {}
     }
+  } finally {
+    activeHandlers--
   }
+})
+
+server.on('connection', (socket) => {
+  connections.add(socket)
+  socket.once('close', () => connections.delete(socket))
 })
 
 server.on('upgrade', (req, socket, head) => {
@@ -1128,10 +1150,26 @@ process.on('unhandledRejection', (e) => console.error('[unhandled]', e))
 
 // Graceful shutdown: stop schedulers/watchers, close the DB (WAL checkpoint).
 let _shuttingDown = false
-function shutdown(signal) {
+async function shutdown(signal) {
   if (_shuttingDown) return
   _shuttingDown = true
-  console.log(`[shutdown] ${signal} — closing`)
+  console.log(`[shutdown] ${signal} — draining requests`)
+  requestLog.stopCleanupScheduler()
+  const drained = new Promise((resolve) => server.close(resolve))
+  server.closeIdleConnections?.()
+  const drainMs = Math.max(1000, Number(process.env.VM2API_DRAIN_TIMEOUT_MS) || 120000)
+  const forceDrain = setTimeout(() => {
+    streamWorkerPool()?.abortAll()
+    server.closeAllConnections?.()
+    for (const socket of connections) socket.destroy()
+    void backupService.cancelActiveBackup()
+  }, drainMs)
+  forceDrain.unref()
+  const hardStop = setTimeout(() => {
+    console.error('[shutdown] drain deadline exceeded; forcing exit')
+    process.exit(1)
+  }, drainMs + 10_000)
+  hardStop.unref()
   try {
     backupService.stopScheduler()
   } catch {}
@@ -1158,6 +1196,13 @@ function shutdown(signal) {
   try {
     notifyMonitor?.stop?.()
   } catch {}
+  await drained
+  while (activeHandlers > 0) await new Promise((resolve) => setTimeout(resolve, 20))
+  await backupService.waitForIdle()
+  await streamWorkerPool()?.close()
+  await requestLog.closeWriter()
+  await requestLog.closeReader()
+  stopSchedulingSnapshots()
   try {
     stopVmWatch()
   } catch {}
@@ -1168,15 +1213,22 @@ function shutdown(signal) {
     clusterManager.stop()
   } catch {}
   try {
-    server.close(() => {})
-  } catch {}
-  try {
     closeDatabase()
   } catch {}
+  clearTimeout(forceDrain)
+  clearTimeout(hardStop)
   process.exit(0)
 }
-process.on('SIGTERM', () => shutdown('SIGTERM'))
-process.on('SIGINT', () => shutdown('SIGINT'))
+const onShutdownError = (error) => {
+  console.error('[shutdown] failed:', error?.message || error)
+  process.exit(1)
+}
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM').catch(onShutdownError)
+})
+process.on('SIGINT', () => {
+  void shutdown('SIGINT').catch(onShutdownError)
+})
 
 server.listen(cfg.port, cfg.host, () => {
   qualityMonitor.start()

@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -10,6 +10,9 @@ import {
 } from '../../src/lib/protocol/handle-codex.mjs'
 import { persistCodexUsage, getVm } from '../../src/lib/vm/vm-registry.mjs'
 import { StickyRouter } from '../../src/lib/pool/sticky-router.mjs'
+import { startSchedulingSnapshot, stopSchedulingSnapshots } from '../../src/lib/vm/scheduling-snapshot.mjs'
+
+afterEach(() => stopSchedulingSnapshots())
 
 test('502 upstream_transport is retryable before commit', () => {
   assert.equal(
@@ -87,6 +90,9 @@ function writeGptVm(root, id) {
       accounts: [{ id: `${id}-acc`, access_token: 'at', refresh_token: 'rt', chatgpt_account_id: id }],
     }),
   )
+  // Exercise production's cached source records with the existing quota,
+  // affinity, model, cap and retry regression cases.
+  startSchedulingSnapshot(root)
 }
 
 test('quota 429 hops the next GPT slot and records 5h/7d extra', async () => {

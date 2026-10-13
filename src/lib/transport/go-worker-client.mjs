@@ -1,3 +1,4 @@
+import { streamWorkerPool } from './stream-workers.mjs'
 import http from 'node:http'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
@@ -137,6 +138,16 @@ function workerRequest(
  * the CLI still owned the job. Best effort: the kernel also sees the drop,
  * and an old worker without the route just answers 404.
  */
+export async function cancelWorkerRequest(exec, requestId) {
+  const response = await workerRequest(exec, {
+    method: 'POST',
+    requestPath: '/internal/v1/cancel',
+    body: { request_id: requestId },
+    timeoutMs: 3000,
+  })
+  response.resume()
+}
+
 function cancelOnAbort(exec, signal, requestId) {
   if (!signal || signal.aborted) return () => {}
   const onAbort = () => {
@@ -589,7 +600,16 @@ export async function callGoWorker({
   }
 }
 
-export async function streamGoWorker({
+export function streamGoWorker(options = {}) {
+  const pool = streamWorkerPool()
+  if (!pool || isCrsMock()) return streamGoWorkerLocal(options)
+  // Header/model policy and fingerprints are owner state and may hot-reload.
+  // Workers receive the final envelope, so moving transport cannot create a
+  // second policy cache or change a slot's identity and cache breakpoints.
+  return pool.run({ ...options, envelope: options.envelope || workerEnvelope({ ...options, stream: true }) })
+}
+
+async function streamGoWorkerLocal({
   requestContext = null,
   exec,
   body,
@@ -607,6 +627,7 @@ export async function streamGoWorker({
   requestPath = '/internal/v1/messages',
   envelope = null,
   cliHop = false,
+  requestId = randomUUID(),
 } = {}) {
   if (isCrsMock()) {
     const { body: outboundBody, headers } = finalizeWorkerPayload({ body, reqHeaders, exec, identity, want1m, cliHop })
@@ -683,7 +704,6 @@ export async function streamGoWorker({
   // Hop-relative TTFT. firstTokenAt is epoch ms so request logs subtract ingress t0.
   const startedAt = Date.now()
   let ttftMs = null
-  const requestId = randomUUID()
   const stopCancel = cancelOnAbort(exec, signal, requestId)
   try {
     const response = await workerRequest(exec, {

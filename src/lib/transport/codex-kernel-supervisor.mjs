@@ -10,6 +10,7 @@ import path from 'node:path'
 import { boundProxyUrl, isLocalEgressProxy, localEgressProxyUrl } from '../vm/egress.mjs'
 import { assertProxyAllowed } from '../vm/proxy-policy.mjs'
 import { codexKernelHealth, codexKernelPaths } from './codex-kernel-client.mjs'
+import { writeJsonIfChanged } from '../vm/vm-file.mjs'
 
 // The kernel exits only through config.proxy_url; inherited proxy variables would give it a second, unseen exit.
 function kernelEnv(env = process.env) {
@@ -58,7 +59,7 @@ export function writeCodexKernelConfig(projectRoot, vm, { token, proxyUrl, proxy
     } catch {}
   }
   if (!secret) secret = crypto.randomBytes(24).toString('hex')
-  fs.writeFileSync(tokenPath, secret + '\n', { mode: 0o600 })
+  writeJsonIfChanged(tokenPath, secret + '\n', { mode: 0o600 })
   const local = isLocalEgressProxy(vm?.proxy)
   const proxy = local ? localEgressProxyUrl() : String(proxyUrl || boundProxyUrl(vm?.proxy) || '').trim()
   // A configured deployment proxy is this slot's exit: fail closed instead of going direct.
@@ -78,7 +79,7 @@ export function writeCodexKernelConfig(projectRoot, vm, { token, proxyUrl, proxy
     max_request_bytes: 32 * 1024 * 1024,
     test_endpoints: process.env.KIN_CODEX_TEST_ENDPOINTS === '1',
   }
-  fs.writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
+  writeJsonIfChanged(configPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 })
   return { runDir, socketPath, configPath, credentialPath, tokenPath }
 }
 

@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { atomicWriteJson, invalidateVmSlotReadCache, withVmLock } from './vm-file.mjs'
+import { atomicWriteJson, invalidateVmSlotReadCache, withVmLock, writeJsonIfChanged } from './vm-file.mjs'
 import { getVm, patchVmRecord } from './vm-registry.mjs'
 import { toHostPath, hostMapEntries } from './host-path.mjs'
 import { imageForKernel, OS_CATALOG } from './os-catalog.mjs'
@@ -89,7 +89,7 @@ export function writeManagedConfig(root, vm) {
   fs.mkdirSync(p.run, { recursive: true, mode: 0o700 })
   const tokenPath = path.join(p.run, 'internal.token')
   if (!fs.existsSync(tokenPath)) fs.writeFileSync(tokenPath, crypto.randomBytes(24).toString('hex'), { mode: 0o600 })
-  atomicWriteJson(
+  writeJsonIfChanged(
     p.config,
     {
       vm_id: vm.id,
@@ -228,7 +228,7 @@ async function command(root, vm, enabled, { restart = false } = {}) {
   } catch {}
   const revision =
     !restart && !stateBefore?.failed && previous?.enabled === enabled ? previous.revision : crypto.randomUUID()
-  atomicWriteJson(p.control, { revision, enabled }, { mode: 0o600 })
+  writeJsonIfChanged(p.control, { revision, enabled }, { mode: 0o600 })
   const until = Date.now() + 10000
   while (Date.now() < until) {
     let state

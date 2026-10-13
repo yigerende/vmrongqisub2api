@@ -58,6 +58,24 @@ test('tar is available in this environment', () => {
   assert.equal(tarAvailable(), true)
 })
 
+test('background backup preserves the archive and excludes overlapping jobs', async () => {
+  seedVm()
+  initVmDbSync(root, { watch: false })
+  let before = false
+  svc.beforeBackup = async () => {
+    before = true
+  }
+  const job = svc.createBackupAsync({ kind: 'manual' })
+  await assert.rejects(svc.createBackupAsync(), { code: 'backup_in_progress' })
+  const rec = await job
+  assert.equal(before, true)
+  assert.equal(rec.status, 'ok')
+  assert.equal(rec.includes.vms, 2)
+  assert.ok(fs.existsSync(rec.file_path))
+  assert.equal(svc.get(rec.id).sha256, rec.sha256)
+  assert.equal(svc._running, false)
+})
+
 test('createBackup produces tar.gz with manifest + db + vms + config, records ok', () => {
   seedVm()
   initVmDbSync(root, { watch: false })

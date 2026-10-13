@@ -5,9 +5,18 @@
 
 import { getDb } from '../database.mjs'
 
+// Statement handles belong to a connection, not a repository wrapper. Values
+// are still read on every get, including changes made by another connection.
+const statements = new WeakMap()
+
 export class SettingsRepo {
   constructor(db = getDb()) {
     this.db = db
+    const cached = statements.get(db)
+    if (cached) {
+      Object.assign(this, cached)
+      return
+    }
     this._get = db.prepare('SELECT value FROM settings WHERE key = ?')
     this._set = db.prepare(`
       INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
@@ -15,6 +24,7 @@ export class SettingsRepo {
     `)
     this._del = db.prepare('DELETE FROM settings WHERE key = ?')
     this._all = db.prepare('SELECT key, value, updated_at FROM settings ORDER BY key')
+    statements.set(db, { _get: this._get, _set: this._set, _del: this._del, _all: this._all })
   }
 
   get(key, fallback = null) {

@@ -1,3 +1,4 @@
+import { readLog } from '../db/report-reader.mjs'
 /**
  * /admin and /api/panel routes. Login / logout / me and { ok, data }
  * envelopes are unchanged; slot start/reload go through startSlotReady.
@@ -271,7 +272,7 @@ function clusterNodesOf(ctx) {
   }
 }
 
-function collectOnboardingFacts(req, ctx) {
+async function collectOnboardingFacts(req, ctx) {
   const ident = panelIdentity(req)
   const ownerUserId = ident.role === 'user' ? req.panelUserId : null
   const vms = listVms(ctx.cfg.paths.project, ctx.routingConfig)
@@ -292,11 +293,11 @@ function collectOnboardingFacts(req, ctx) {
     proxyCount: (snap.proxies || []).length,
     ...vmStepFacts(visible),
     activeKeyCount: mine.filter((k) => k.status === 'active').length,
-    hasFirstRequest: ctx.requestLog.hasSuccessfulRequest({ owner_user_id: ownerUserId }),
+    hasFirstRequest: await readLog(ctx.requestLog, 'hasSuccessfulRequest', { owner_user_id: ownerUserId }),
   }
 }
 
-function onboardingPayloadFor(req, ctx) {
+async function onboardingPayloadFor(req, ctx) {
   const user = onboardingUserOf(req)
   const role = onboardingRoleOf(req)
   const rec = recordOf(loadOnboardingState(new SettingsRepo()), user)
@@ -307,7 +308,7 @@ function onboardingPayloadFor(req, ctx) {
     updated_at: rec.updated_at,
     // cfg.base_url falls back to HOST:PORT (often 0.0.0.0); only an explicit public URL beats the browser origin.
     base_url: process.env.PUBLIC_BASE_URL || null,
-    facts: collectOnboardingFacts(req, ctx),
+    facts: await collectOnboardingFacts(req, ctx),
   })
 }
 
@@ -1091,7 +1092,7 @@ export function createPanelHandler(ctx) {
             throw e
           }
         }
-        return json(res, 200, panel.ok(onboardingPayloadFor(req, ctx)))
+        return json(res, 200, panel.ok(await onboardingPayloadFor(req, ctx)))
       }
       if (p.startsWith('/api/panel/cluster/')) return ctx.clusterRoutes.handle(req, res, url)
       if (req.method === 'GET' && p === '/api/panel/database/metrics') {
@@ -1252,7 +1253,7 @@ export function createPanelHandler(ctx) {
         if (denyIfUserMissesKey(req, res, { apiKeyStore, json, keyId: id })) return true
         const rec = apiKeyStore.getById(id)
         if (!rec) return json(res, 404, { ok: false, error: { message: 'api key not found' } })
-        const usage_stats = requestLog?.keyUsageStats?.({ apiKeyId: id, days: 30 }) || null
+        const usage_stats = (await readLog(requestLog, 'keyUsageStats', { apiKeyId: id, days: 30 })) || null
         return json(res, 200, { ok: true, item: publicKeyView(rec, { reveal: false }), usage_stats })
       }
       if (req.method === 'POST' && p === '/api/panel/api-keys') {
@@ -1512,8 +1513,8 @@ export function createPanelHandler(ctx) {
           return json(res, 200, {
             ok: true,
             mode: 'debug',
-            config: requestLog.snapshot(),
-            items: requestLog.listDebug({
+            config: await (requestLog.snapshotAsync?.() || requestLog.snapshot()),
+            items: await readLog(requestLog, 'listDebug', {
               limit,
               error_class: u.searchParams.get('error_class') || null,
               exclude_error_class: u.searchParams.get('exclude_error_class') || null,
@@ -1540,11 +1541,11 @@ export function createPanelHandler(ctx) {
           q: u.searchParams.get('q') || null,
           owner_user_id: panelIdentity(req).role === 'user' ? req.panelUserId : u.searchParams.get('user_id') || null,
         }
-        const { items, total } = requestLog.queryNormal(filters)
+        const { items, total } = await readLog(requestLog, 'queryNormal', filters)
         return json(res, 200, {
           ok: true,
           mode: 'normal',
-          config: requestLog.snapshot(),
+          config: await (requestLog.snapshotAsync?.() || requestLog.snapshot()),
           items,
           total,
           limit: filters.limit,
@@ -1571,7 +1572,7 @@ export function createPanelHandler(ctx) {
           q: u.searchParams.get('q') || null,
           owner_user_id: panelIdentity(req).role === 'user' ? req.panelUserId : u.searchParams.get('user_id') || null,
         }
-        const { items, total } = requestLog.exportRows(filters)
+        const { items, total } = await readLog(requestLog, 'exportRows', filters)
         const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')
         const body = format === 'csv' ? logsToCsv(items) : logsToJsonl(items)
         const filename = `vm2api-logs-${stamp}.${format}`
@@ -1598,17 +1599,17 @@ export function createPanelHandler(ctx) {
           bucket,
           since,
           until,
-          totals: tenant ? null : requestLog.totals(),
-          buckets: requestLog.aggregate({ since, until, bucket, owner_user_id }),
-          window: requestLog.windowStats({ since, until, owner_user_id }),
-          muted_error_classes: requestLog.snapshot().muted_error_classes,
-          config: tenant ? null : requestLog.snapshot(),
+          totals: tenant ? null : await readLog(requestLog, 'totals'),
+          buckets: await readLog(requestLog, 'aggregate', { since, until, bucket, owner_user_id }),
+          window: await readLog(requestLog, 'windowStats', { since, until, owner_user_id }),
+          muted_error_classes: requestLog.mutedErrorClasses || requestLog.snapshot().muted_error_classes,
+          config: tenant ? null : await (requestLog.snapshotAsync?.() || requestLog.snapshot()),
         })
       }
       if (req.method === 'GET' && /^\/api\/panel\/request-logs\/[^/]+\/attempts$/.test(p)) {
         const requestId = p.split('/')[4]
         const owner_user_id = panelIdentity(req).role === 'user' ? req.panelUserId : null
-        if (owner_user_id && !requestLog.getDebug(requestId, { owner_user_id })) {
+        if (owner_user_id && !(await readLog(requestLog, 'getDebug', requestId, { owner_user_id }))) {
           return json(res, 404, { ok: false, error: { message: 'debug log not found' } })
         }
         return json(
@@ -1626,7 +1627,7 @@ export function createPanelHandler(ctx) {
       if (req.method === 'GET' && /^\/api\/panel\/request-logs\/[^/]+$/.test(p)) {
         const id = p.split('/').pop()
         const owner_user_id = panelIdentity(req).role === 'user' ? req.panelUserId : null
-        const rec = requestLog.getDebug(id, { owner_user_id })
+        const rec = await readLog(requestLog, 'getDebug', id, { owner_user_id })
         if (!rec) return json(res, 404, { ok: false, error: { message: 'debug log not found' } })
         return json(res, 200, { ok: true, item: rec })
       }
@@ -1634,35 +1635,54 @@ export function createPanelHandler(ctx) {
       // ---- Scrolling usage logs (keyset cursor, camelCase rows) ----
       // Lives beside /request-logs (offset + snake_case, still used by error
       // collection and export); this surface never COUNTs the table.
-      const usageLogsView = () => new UsageLogsView(getDb(), { mutedErrorClasses: requestLog?.mutedErrorClasses })
+      const usageLogsView = () =>
+        requestLog?.readerPath
+          ? new Proxy(
+              {},
+              {
+                get:
+                  (_, method) =>
+                  (...args) =>
+                    requestLog.readView('view', method, ...args),
+              },
+            )
+          : new UsageLogsView(getDb(), { mutedErrorClasses: requestLog?.mutedErrorClasses })
       const tenantId = () => (panelIdentity(req).role === 'user' ? req.panelUserId : null)
       if (req.method === 'GET' && p === '/api/panel/usage-logs') {
         const u = new URL(req.url, 'http://x')
-        return json(res, 200, panel.ok(usageLogsView().listBatch(usageLogFilters(req, u))))
+        return json(res, 200, panel.ok(await usageLogsView().listBatch(usageLogFilters(req, u))))
       }
       if (req.method === 'GET' && p === '/api/panel/usage-logs/summary') {
         const u = new URL(req.url, 'http://x')
-        return json(res, 200, panel.ok(usageLogsView().summary(usageLogFilters(req, u))))
+        return json(res, 200, panel.ok(await usageLogsView().summary(usageLogFilters(req, u))))
       }
       if (req.method === 'GET' && p === '/api/panel/usage-logs/filter-options') {
-        return json(res, 200, panel.ok(usageLogsView().filterOptions({ owner_user_id: tenantId() })))
+        return json(res, 200, panel.ok(await usageLogsView().filterOptions({ owner_user_id: tenantId() })))
       }
       if (req.method === 'GET' && p === '/api/panel/usage-logs/session-suggestions') {
         const u = new URL(req.url, 'http://x')
         const q = u.searchParams.get('q') || ''
         const limit = u.searchParams.get('limit')
-        return json(res, 200, panel.ok(usageLogsView().sessionSuggestions({ q, limit, owner_user_id: tenantId() })))
+        return json(
+          res,
+          200,
+          panel.ok(await usageLogsView().sessionSuggestions({ q, limit, owner_user_id: tenantId() })),
+        )
       }
       if (req.method === 'GET' && p === '/api/panel/usage-logs/active-sessions') {
         const u = new URL(req.url, 'http://x')
         const minutes = u.searchParams.get('minutes')
         const limit = u.searchParams.get('limit')
-        return json(res, 200, panel.ok(usageLogsView().activeSessions({ minutes, limit, owner_user_id: tenantId() })))
+        return json(
+          res,
+          200,
+          panel.ok(await usageLogsView().activeSessions({ minutes, limit, owner_user_id: tenantId() })),
+        )
       }
       if (req.method === 'GET' && p === '/api/panel/usage-logs/overview') {
         const u = new URL(req.url, 'http://x')
         const tz = u.searchParams.get('tz') || 'UTC'
-        return json(res, 200, panel.ok(usageLogsView().overview({ tz, owner_user_id: tenantId() })))
+        return json(res, 200, panel.ok(await usageLogsView().overview({ tz, owner_user_id: tenantId() })))
       }
 
       // ---- Statistics page ----
@@ -1671,7 +1691,15 @@ export function createPanelHandler(ctx) {
         const q = statsParams(req, u, 'dimension')
         if (q.error) return json(res, 400, { ok: false, error: { message: q.error } })
         const { range, dimension, tz, owner_user_id } = q
-        return json(res, 200, panel.ok(new StatisticsRepo(getDb()).statistics({ range, dimension, tz, owner_user_id })))
+        return json(
+          res,
+          200,
+          panel.ok(
+            await (requestLog?.readerPath
+              ? requestLog.readView('statistics', 'statistics', { range, dimension, tz, owner_user_id })
+              : new StatisticsRepo(getDb()).statistics({ range, dimension, tz, owner_user_id })),
+          ),
+        )
       }
       if (req.method === 'GET' && p === '/api/panel/statistics/leaderboard') {
         const u = new URL(req.url, 'http://x')
@@ -1682,7 +1710,11 @@ export function createPanelHandler(ctx) {
         return json(
           res,
           200,
-          panel.ok(new StatisticsRepo(getDb()).leaderboard({ range, scope, limit, tz, owner_user_id })),
+          panel.ok(
+            await (requestLog?.readerPath
+              ? requestLog.readView('statistics', 'leaderboard', { range, scope, limit, tz, owner_user_id })
+              : new StatisticsRepo(getDb()).leaderboard({ range, scope, limit, tz, owner_user_id })),
+          ),
         )
       }
 
@@ -1693,7 +1725,11 @@ export function createPanelHandler(ctx) {
         const groupBy = u.searchParams.get('group_by') === 'key' ? 'key' : 'vm'
         const since = u.searchParams.get('from') || u.searchParams.get('since') || null
         const until = u.searchParams.get('until') || null
-        return json(res, 200, panel.ok(requestLog.ownerBilling({ ownerUserId, since, until, groupBy })))
+        return json(
+          res,
+          200,
+          panel.ok(await readLog(requestLog, 'ownerBilling', { ownerUserId, since, until, groupBy })),
+        )
       }
 
       // ---- Backups (local auto/manual, download, restore) ----
@@ -1708,7 +1744,8 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'POST' && p === '/api/panel/backups') {
         try {
-          const rec = backupService.createBackup({ kind: 'manual' })
+          const rec = await (backupService.createBackupAsync?.({ kind: 'manual' }) ||
+            backupService.createBackup({ kind: 'manual' }))
           return json(res, 201, { ok: true, item: rec })
         } catch (e) {
           const status = e.code === 'backup_in_progress' ? 409 : 500
@@ -1759,13 +1796,27 @@ export function createPanelHandler(ctx) {
           })
         }
         try {
-          const out = backupService.restoreBackup(id)
+          if (requestLog.readerPaused)
+            throw Object.assign(new Error('restore already in progress'), { code: 'restore_in_progress' })
+          if (backupService._running)
+            throw Object.assign(new Error('backup already in progress'), { code: 'backup_in_progress' })
+          requestLog.readerPaused = true
+          let out
+          try {
+            await requestLog.closeReader?.()
+            await requestLog.closeWriter?.()
+            out = backupService.restoreBackup(id)
+          } finally {
+            requestLog.readerPaused = false
+            if (requestLog.writerPath && !requestLog.writer) requestLog.enableWriter(requestLog.writerPath)
+          }
           return json(res, 200, { ok: true, ...out })
         } catch (e) {
           const map = {
             backup_not_found: 404,
             backup_file_missing: 404,
             restore_in_progress: 409,
+            backup_in_progress: 409,
             backup_corrupt: 422,
             backup_not_ok: 422,
           }
@@ -4122,7 +4173,7 @@ export function createPanelHandler(ctx) {
       }
       // GET /api/panel/usage
       if (req.method === 'GET' && p === '/api/panel/usage') {
-        return json(res, 200, panel.buildUsage({ accountQuota, cfg, requestLog }))
+        return json(res, 200, await panel.buildUsageAsync({ accountQuota, cfg, requestLog }))
       }
       // GET /api/panel/models
       if (req.method === 'GET' && p === '/api/panel/models') {
@@ -4437,7 +4488,7 @@ export function createPanelHandler(ctx) {
         return json(res, 200, panel.ok(refusalGuardSnapshot()))
       }
       if (req.method === 'GET' && p === '/api/panel/protocol-entry') {
-        return json(res, 200, panel.ok(requestLog.protocolEntryStats()))
+        return json(res, 200, panel.ok(await readLog(requestLog, 'protocolEntryStats')))
       }
       if (req.method === 'GET' && p === '/api/panel/jev-intercept') {
         return json(res, 200, panel.ok(jevInterceptSnapshot()))

@@ -62,6 +62,12 @@ export function listVmRecordFiles(dir) {
  * fixed LRU so deleted paths cannot accumulate without bound.
  * ------------------------------------------------------------------------ */
 const readCache = new Map()
+const invalidationListeners = new Set()
+
+export function onFileInvalidated(listener) {
+  invalidationListeners.add(listener)
+  return () => invalidationListeners.delete(listener)
+}
 
 /** Conservative bound: a large fleet of records + credential files, LRU. */
 export const VM_READ_CACHE_MAX_ENTRIES = 1024
@@ -129,6 +135,7 @@ export function readJsonCached(file) {
 
 /** Drop one path (or the whole cache). Returns whether a path entry was present. */
 export function invalidateReadCache(file = null) {
+  for (const listener of invalidationListeners) listener(file)
   if (!file) {
     readCache.clear()
     return

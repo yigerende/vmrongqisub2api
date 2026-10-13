@@ -8,6 +8,7 @@ services:
     container_name: ${VM2API_CONTAINER_NAME:-vm2api}
     restart: unless-stopped
     init: true
+    stop_grace_period: 135s
     network_mode: host
     cap_add:
       - NET_ADMIN
@@ -23,6 +24,9 @@ services:
       KIN_CODEX_KERNEL_BIN: /opt/vm2api/bin/kin-codex-kernel
       KIN_OAUTH_AUTH_BIN: /opt/vm2api/bin/kin-oauth-auth
       KIN_AUTO_SYNC_WRAP: ${KIN_AUTO_SYNC_WRAP:-1}
+      # Stateless SSE parsing on separate CPU cores. 0 restores inline transport.
+      VM2API_STREAM_WORKERS: ${VM2API_STREAM_WORKERS:-8}
+      VM2API_DRAIN_TIMEOUT_MS: ${VM2API_DRAIN_TIMEOUT_MS:-120000}
       # 自省容器名；VM2API_HOST_ROOT 可显式覆盖宿主安装目录。
       VM2API_CONTAINER_NAME: ${VM2API_CONTAINER_NAME:-vm2api}
       VM2API_HOST_ROOT: ${VM2API_HOST_ROOT:-}

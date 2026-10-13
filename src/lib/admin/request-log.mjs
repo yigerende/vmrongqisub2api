@@ -20,6 +20,9 @@ import crypto from 'node:crypto'
 import { redactSecrets } from '../core/security.mjs'
 import { resolveStoreDb } from '../db/database.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
+import { ReportReader } from '../db/report-reader.mjs'
+import { LogWriter } from '../db/log-writer.mjs'
+import { persistLogBatch } from '../db/persist-log-batch.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
 import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
 import { normalizeCacheTtl } from '../protocol/cache-ttl.mjs'
@@ -319,6 +322,55 @@ export function newRequestId(req) {
 }
 
 export class RequestLogStore {
+  enableWriter(dbPath) {
+    this.writerPath = dbPath
+    this.writer = new LogWriter(dbPath, (rows) => persistLogBatch(this.db, this.repo, rows))
+  }
+
+  async closeWriter() {
+    const writer = this.writer
+    this.writer = null
+    await writer?.close()
+  }
+
+  enableReader(dbPath) {
+    this.readerPath = dbPath
+  }
+
+  async read(method, ...args) {
+    if (this.readerPaused) throw Object.assign(new Error('reporting is paused for restore'), { status: 503 })
+    await this.writer?.flush()
+    if (this.readerPaused) throw Object.assign(new Error('reporting is paused for restore'), { status: 503 })
+    if (!this.readerPath) return this[method](...args)
+    this.reader ||= new ReportReader(this.readerPath)
+    return this.reader.call('log', method, args, { mutedErrorClasses: this.mutedErrorClasses })
+  }
+
+  async readView(kind, method, ...args) {
+    if (this.readerPaused) throw Object.assign(new Error('reporting is paused for restore'), { status: 503 })
+    await this.writer?.flush()
+    if (this.readerPaused) throw Object.assign(new Error('reporting is paused for restore'), { status: 503 })
+    if (!this.readerPath) throw new Error('report reader is not configured')
+    this.reader ||= new ReportReader(this.readerPath)
+    return this.reader.call(kind, method, args, { mutedErrorClasses: this.mutedErrorClasses })
+  }
+
+  async closeReader() {
+    const reader = this.reader
+    this.reader = null
+    await reader?.close()
+  }
+
+  count() {
+    return this.repo.count()
+  }
+
+  async snapshotAsync() {
+    const snapshot = this.snapshot({ count: false })
+    snapshot.total_rows = await this.read('count')
+    return snapshot
+  }
+
   constructor({
     dataDir,
     db,
@@ -381,6 +433,7 @@ export class RequestLogStore {
     this.db = db
     this.repo = new UsageLogsRepo(db)
     this._mem = []
+    if (this.writerPath) this.enableWriter(this.writerPath)
   }
 
   start(req, { protocol = null, pathName = null } = {}) {
@@ -530,14 +583,15 @@ export class RequestLogStore {
     if (classified?.error_class) summary.error_class = classified.error_class
 
     try {
-      this.repo.insertSummaryIfAbsent(summary)
+      if (!this.writer) this.repo.insertSummaryIfAbsent(summary)
     } catch {}
     if (this.jsonlMirror) this._appendJsonl(summary)
     this._mem.push(summary)
     if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)
 
+    let debugRec = null
     if (ctx.mode === 'debug') {
-      const debugRec = {
+      debugRec = {
         ...summary,
         headers: ctx.headers,
         inbound_summary: extra.inbound_summary || summarizeBody(extra.inbound_body),
@@ -563,8 +617,15 @@ export class RequestLogStore {
         response: ctx.response ? debugResponse(ctx.response) : null,
       }
       try {
+        // Keep mutable debug records ordered on the owner connection. Replaying
+        // an older worker batch must never overwrite a newer repeated request id.
         this.repo.insertDebug(summary.request_id || summary.id, summary.ts, debugRec)
       } catch {}
+    }
+    try {
+      this.writer?.enqueue({ summary })
+    } catch (error) {
+      console.warn('[request-log] unable to persist request summary:', error?.code || error?.message)
     }
     return summary
   }
@@ -679,7 +740,7 @@ export class RequestLogStore {
     return rec
   }
 
-  snapshot() {
+  snapshot({ count = true } = {}) {
     return {
       mode: this.mode,
       retain_days: this.retainDays,
@@ -690,6 +751,7 @@ export class RequestLogStore {
       backend: 'sqlite',
       jsonl_mirror: this.jsonlMirror,
       total_rows: (() => {
+        if (!count) return null
         try {
           return this.repo.count()
         } catch {

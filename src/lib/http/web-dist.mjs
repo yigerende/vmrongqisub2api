@@ -80,3 +80,31 @@ export function tryServeWebDist(res, projectRoot, pathname) {
   res.end(fs.readFileSync(file))
   return true
 }
+
+/** HTTP entry uses asynchronous file I/O; embedded sync API stays compatible. */
+export async function tryServeWebDistAsync(res, projectRoot, pathname) {
+  const root = distRoot(projectRoot)
+  const rel = relativePath(pathname)
+  if (!rel || rel.includes('\0') || rel.split(/[\\/]/).includes('..')) return false
+  const file = path.resolve(root, rel)
+  if (!file.startsWith(root + path.sep)) return false
+  let handle
+  try {
+    handle = await fs.promises.open(file, 'r')
+    if (!(await handle.stat()).isFile()) return false
+    const data = await handle.readFile()
+    if (res.destroyed || res.writableEnded) return true
+    const ext = path.extname(file).toLowerCase()
+    res.writeHead(200, {
+      'content-type': MIME[ext] || 'application/octet-stream',
+      'cache-control': cacheControl(rel, ext),
+    })
+    res.end(data)
+    return true
+  } catch (error) {
+    if (['ENOENT', 'ENOTDIR', 'EISDIR'].includes(error.code)) return false
+    throw error
+  } finally {
+    await handle?.close()
+  }
+}
