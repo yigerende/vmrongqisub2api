@@ -39,7 +39,7 @@ export function keyLimitsPayload(
   }
   if (draft.group_type === 'pool') {
     const vm_pool_id = String(draft.vm_pool_id || '').trim()
-    if (!vm_pool_id) throw new Error('选择一个账号池')
+    if (!vm_pool_id) throw new Error('选择一个账号分组')
     body.group_type = 'all'
     body.allowed_vms = []
     body.vm_pool_id = vm_pool_id

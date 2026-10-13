@@ -13,6 +13,8 @@ import {
 import { ProxyPool } from '../../src/lib/vm/proxy-pool.mjs'
 import { getVm, bindVmProxy } from '../../src/lib/vm/vm-registry.mjs'
 import { startVmRuntime, stopVmRuntime, destroyVmRuntime } from '../../src/lib/vm/vm-runtime.mjs'
+import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { VmPoolsRepo } from '../../src/lib/db/repos/vm-pools-repo.mjs'
 
 function environment(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'space-proxy-'))
@@ -35,6 +37,35 @@ function input() {
     proxy_id: 'px-local',
   }
 }
+
+test('grouped onboarding pins all groups before Docker; invalid groups never allocate a slot', async (t) => {
+  const { root, proxyPool } = environment(t)
+  const db = openDatabase({ dataDir: path.join(root, 'group-db') })
+  try {
+    const groups = new VmPoolsRepo(db)
+    const a = groups.insert({ name: 'A' }),
+      b = groups.insert({ name: 'B' })
+    failDocker(t, root)
+    const invalid = { ...input(), group_ids: [a.id, 'pool_ffffffff'] }
+    await assert.rejects(createManagedCodex(root, invalid, {}, proxyPool), { code: 'pool_unavailable' })
+    assert.equal(getVm(root, assignmentId(invalid)), null)
+    assert.equal(proxyPool.getProxyForVm(assignmentId(invalid)), null)
+    const body = { ...input(), group_ids: [b.id, a.id] }
+    await assert.rejects(createManagedCodex(root, body, {}, proxyPool), { code: 'docker_failed' })
+    const before = getVm(root, assignmentId(body))
+    assert.deepEqual(before.group_ids, [a.id, b.id].sort())
+    assert.equal(before.schedulable, false)
+    await assert.rejects(createManagedCodex(root, { ...body, group_ids: [a.id] }, {}, proxyPool), {
+      code: 'assignment_conflict',
+    })
+    await assert.rejects(createManagedCodex(root, { ...body, group_ids: [a.id, b.id, a.id] }, {}, proxyPool), {
+      code: 'docker_failed',
+    })
+    assert.deepEqual(getVm(root, before.id).fingerprint, before.fingerprint)
+  } finally {
+    closeDatabase()
+  }
+})
 
 function assignmentId(body) {
   return `space-${crypto.createHash('sha256').update(body.assignment_id).digest('hex').slice(0, 24)}`

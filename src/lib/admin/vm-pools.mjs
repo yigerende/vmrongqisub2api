@@ -1,6 +1,6 @@
 /**
  * Panel-facing vm pool rules. The repo stores rows; this checks names and
- * that every member is a live slot and not already in another pool.
+ * that every member is a live slot. A slot may belong to multiple groups.
  */
 import { VmPoolsRepo } from '../db/repos/vm-pools-repo.mjs'
 

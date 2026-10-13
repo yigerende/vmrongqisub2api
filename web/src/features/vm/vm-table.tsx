@@ -111,6 +111,14 @@ function VmCard({ vm, accounts }: { vm: Vm; accounts?: UsageAccountRow[] }) {
         )}
       </div>
 
+      {vm.group_names?.length ? (
+        <p
+          className='truncate text-xs text-muted-foreground'
+          title={vm.group_names.join(' / ')}
+        >
+          {vm.group_names.join(' / ')}
+        </p>
+      ) : null}
       <ProxyChip vm={vm} className='w-full' compact />
 
       <VmUsageWindows vm={vm} accounts={accounts} quiet quotaActions />

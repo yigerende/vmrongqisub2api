@@ -1068,6 +1068,7 @@ export function createPanelHandler(ctx) {
             account_container_names: true,
             delete_account: true,
             proxy_selection: true,
+            account_groups: true,
             quality_results: true,
           }),
         )
@@ -1192,6 +1193,17 @@ export function createPanelHandler(ctx) {
       }
       if (req.method === 'GET' && p === '/api/panel/vm-pools') {
         return json(res, 200, panel.ok({ pools: vmPoolsFor(apiKeyStore.db).list() }))
+      }
+      if (req.method === 'GET' && p === '/api/panel/vm-groups') {
+        const groups = vmPoolsFor(apiKeyStore.db)
+          .list()
+          .map(({ id, name, enabled, vm_ids }) => ({
+            id,
+            name,
+            enabled,
+            account_count: vm_ids.length,
+          }))
+        return json(res, 200, panel.ok({ groups }))
       }
       if (req.method === 'POST' && p === '/api/panel/vm-pools') {
         const body = await readBody(req, 64 * 1024).catch(() => ({}))

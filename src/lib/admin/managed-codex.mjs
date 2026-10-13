@@ -18,6 +18,7 @@ import { resolveMachineSpec } from '../vm/machine-spec.mjs'
 import { generateWorkstationFingerprint, takenFingerprintKeys } from '../identity/workstation-fingerprint.mjs'
 import { parseCodexImportPayload, upsertCodexAccount, readCodexAccounts } from '../vm/codex-slot.mjs'
 import { vmPoolsFor } from './vm-pools.mjs'
+import { normalizeVmGroupIds } from './vm-account-groups.mjs'
 import { getDb } from '../db/database.mjs'
 import {
   managedCodex,
@@ -102,6 +103,7 @@ export function reconcileManagedCodexProxies(root, proxyPool) {
 }
 
 export async function createManagedCodex(root, body, routing = {}, proxyPool) {
+  const groupIds = normalizeVmGroupIds(body.group_ids, body.pool_id)
   const assignment = String(body.assignment_id || '')
   if (!/^[a-zA-Z0-9:_-]{8,200}$/.test(assignment))
     throw containerError('invalid_assignment', '缺少稳定的账号轮次标识', 400)
@@ -117,9 +119,10 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
       (String(body.account_email || '')
         .trim()
         .toLowerCase() !== vm.account_email.toLowerCase() ||
-        String(body.pool_id || '') !== String(vm.pool_id || ''))
+        String(body.pool_id || '') !== String(vm.pool_id || '') ||
+        JSON.stringify(groupIds) !== JSON.stringify(normalizeVmGroupIds(vm.group_ids, vm.pool_id)))
     )
-      throw containerError('assignment_conflict', '同一轮次不能更换账号或账号池')
+      throw containerError('assignment_conflict', '同一轮次不能更换账号或分组')
     if (!vm) {
       const email = String(body.account_email || '').trim()
       if (!email || email.length > 254) throw containerError('invalid_email', '需要账号邮箱', 400)
@@ -139,8 +142,7 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
       if (!['en_US.UTF-8', 'zh_CN.UTF-8', 'ja_JP.UTF-8', 'C'].includes(locale))
         throw containerError('invalid_locale', '语言不支持', 400)
       const poolId = String(body.pool_id || '')
-      const pool = poolId ? vmPoolsFor(getDb()).get(poolId) : null
-      if (poolId && !pool?.enabled) throw containerError('pool_unavailable', '账号池不可用', 400)
+      if (groupIds.length) vmPoolsFor(getDb()).assertEnabled(groupIds)
       const now = new Date().toISOString()
       vm = {
         id,
@@ -150,6 +152,7 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
         execution_mode: executionMode,
         container_name: accountContainerName(email, id),
         pool_id: poolId || null,
+        group_ids: groupIds,
         platform: 'openai',
         family: 'codex',
         codex_kernel: true,
@@ -280,7 +283,13 @@ export async function handleManagedCodex({ req, res, url, cfg, routing, proxyPoo
       await withManagedMaintenance(root, vm, async (current) => {
         if (body.schedulable) {
           await ensureManagedKernel(managedExec(root, current), { internal: true })
-          if (current.pool_id) vmPoolsFor(getDb()).addMember(current.pool_id, id)
+          // Only initial onboarding assigns groups. Reauth/resume must preserve
+          // any subsequent membership changes made by the operator.
+          if (!current.group_membership_initialized) {
+            const ids = normalizeVmGroupIds(current.group_ids, current.pool_id)
+            if (ids.length) vmPoolsFor(getDb()).addToGroups(ids, id)
+            patchVmRecord(root, id, { group_membership_initialized: true })
+          }
         }
         setVmSchedulable(root, id, body.schedulable, body.schedulable ? null : 'manual', {
           preserveStatus: true,

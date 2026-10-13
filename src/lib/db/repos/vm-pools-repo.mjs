@@ -1,6 +1,6 @@
 /**
  * Named slot pools. Membership is the schedule source for keys with vm_pool_id.
- * A vm_id can appear in only one pool (unique index).
+ * Account groups are many-to-many; legacy pool IDs and key scopes are preserved.
  */
 import crypto from 'node:crypto'
 import { getDb, withTransaction } from '../database.mjs'
@@ -35,7 +35,6 @@ export class VmPoolsRepo {
     this._delete = db.prepare('DELETE FROM vm_pools WHERE id = ?')
     this._clearMembers = db.prepare('DELETE FROM vm_pool_members WHERE pool_id = ?')
     this._addMember = db.prepare('INSERT INTO vm_pool_members (pool_id, vm_id, created_at) VALUES (?, ?, ?)')
-    this._other = db.prepare('SELECT pool_id FROM vm_pool_members WHERE vm_id = ? AND pool_id != ?')
     this._keyCount = db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE vm_pool_id = ? AND deleted_at IS NULL')
   }
 
@@ -91,38 +90,42 @@ export class VmPoolsRepo {
   }
 
   /**
-   * Replace membership. A vm already in another pool is rejected and nothing
-   * is written. Passing the same vm ids is a no-op aside from updated_at.
+   * Replace this group's membership without touching any other group.
    */
   setMembers(id, vmIds) {
     if (!this._get.get(id)) return null
-    for (const vmId of vmIds) {
-      const other = this._other.get(vmId, id)
-      if (other) {
-        throw Object.assign(new Error(`槽位 ${vmId} 已在其他账号池`), {
-          code: 'vm_in_other_pool',
-          vm_id: vmId,
-          pool_id: other.pool_id,
-        })
-      }
-    }
     const now = nowIso()
     withTransaction(this.db, () => {
       this._clearMembers.run(id)
-      for (const vmId of vmIds) this._addMember.run(id, vmId, now)
+      for (const vmId of new Set(vmIds)) this._addMember.run(id, vmId, now)
       this._touch.run(now, id)
     })
     return this.get(id)
   }
 
   addMember(id, vmId) {
-    if (!this.get(id)?.enabled) throw Object.assign(new Error('账号池不存在或未启用'), { code: 'pool_unavailable' })
-    const other = this._other.get(vmId, id)
-    if (other) throw Object.assign(new Error('槽位已属于其他账号池'), { code: 'vm_in_other_pool' })
-    this.db
-      .prepare('INSERT OR IGNORE INTO vm_pool_members (pool_id, vm_id, created_at) VALUES (?, ?, ?)')
-      .run(id, vmId, nowIso())
+    this.addToGroups([id], vmId)
     return this.get(id)
+  }
+
+  assertEnabled(ids) {
+    for (const id of ids) {
+      if (!this._get.get(id)?.enabled) {
+        throw Object.assign(new Error(`账号分组 ${id} 不存在或未启用`), { code: 'pool_unavailable', status: 400 })
+      }
+    }
+  }
+
+  /** All requested groups succeed together; no partial/global fallback. */
+  addToGroups(ids, vmId) {
+    withTransaction(this.db, () => {
+      this.assertEnabled(ids)
+      const insert = this.db.prepare(
+        'INSERT OR IGNORE INTO vm_pool_members (pool_id, vm_id, created_at) VALUES (?, ?, ?)',
+      )
+      const now = nowIso()
+      for (const id of new Set(ids)) insert.run(id, vmId, now)
+    })
   }
 
   remove(id) {

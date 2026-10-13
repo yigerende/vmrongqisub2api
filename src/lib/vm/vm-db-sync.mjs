@@ -67,6 +67,7 @@ export function syncVmFile(filePath) {
 export function removeVmFromDb(id) {
   const r = repo()
   if (!r || !id) return false
+  getDb().prepare('DELETE FROM vm_pool_members WHERE vm_id = ?').run(id)
   return r.remove(id)
 }
 

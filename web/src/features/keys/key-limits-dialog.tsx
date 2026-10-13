@@ -260,14 +260,14 @@ export function KeyLimitsDialog({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value='all'>all · 全局可调度</SelectItem>
-                {pools ? <SelectItem value='pool'>账号池</SelectItem> : null}
+                {pools ? <SelectItem value='pool'>账号分组</SelectItem> : null}
                 <SelectItem value='anthropic'>anthropic</SelectItem>
                 <SelectItem value='openai'>openai</SelectItem>
               </SelectContent>
             </Select>
           </Field>
           {draft.group_type === 'pool' ? (
-            <Field label='账号池'>
+            <Field label='账号分组'>
               <Select
                 value={draft.vm_pool_id || ''}
                 onValueChange={(id) =>
@@ -275,7 +275,7 @@ export function KeyLimitsDialog({
                 }
               >
                 <SelectTrigger>
-                  <SelectValue placeholder='选择账号池' />
+                  <SelectValue placeholder='选择账号分组' />
                 </SelectTrigger>
                 <SelectContent>
                   {(pools || []).map((pool) => (

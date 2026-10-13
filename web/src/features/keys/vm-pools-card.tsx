@@ -19,7 +19,10 @@ export function VmPoolsCard({ vms }: { vms: Vm[] }) {
   const q = useQuery(vmPoolsQueryOptions())
   const pools = q.data?.pools || []
   const refresh = () =>
-    qc.invalidateQueries({ queryKey: vmPoolsQueryOptions().queryKey })
+    Promise.all([
+      qc.invalidateQueries({ queryKey: vmPoolsQueryOptions().queryKey }),
+      qc.invalidateQueries({ queryKey: ['panel', 'api-keys'] }),
+    ])
 
   const save = useMutation({
     mutationFn: (body: {
@@ -41,7 +44,7 @@ export function VmPoolsCard({ vms }: { vms: Vm[] }) {
       })
     },
     onSuccess: async () => {
-      toast.success('账号池已保存')
+      toast.success('账号分组已保存')
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -52,7 +55,7 @@ export function VmPoolsCard({ vms }: { vms: Vm[] }) {
         method: 'DELETE',
       }),
     onSuccess: async () => {
-      toast.success('账号池已删除')
+      toast.success('账号分组已删除')
       await refresh()
     },
     onError: (error: Error) => toast.error(error.message),
@@ -61,9 +64,9 @@ export function VmPoolsCard({ vms }: { vms: Vm[] }) {
   return (
     <section className='mb-4 space-y-3 rounded-md border p-3'>
       <div>
-        <h2 className='text-sm font-medium'>账号池</h2>
+        <h2 className='text-sm font-medium'>账号分组</h2>
         <p className='text-xs text-muted-foreground'>
-          一台槽只属于一个池。密钥绑定池之后，选槽、重试、排队和粘性会话都只落在当前成员里，池停用或为空时直接失败，不回落到全局。
+          一个账号可加入多个分组。密钥绑定分组后只调用该组账号；分组停用或为空时不回落到全局。全局密钥保持原有范围。
         </p>
       </div>
       <PoolEditor
@@ -71,9 +74,14 @@ export function VmPoolsCard({ vms }: { vms: Vm[] }) {
         pending={save.isPending}
         onSubmit={(name, vmIds) => save.mutate({ name, vm_ids: vmIds })}
       />
+      {q.error ? (
+        <p role='alert' className='text-sm text-destructive'>
+          {q.error.message}
+        </p>
+      ) : null}
       {pools.map((pool) => (
         <PoolRow
-          key={pool.id}
+          key={`${pool.id}:${pool.updated_at}:${pool.vm_ids.join(',')}`}
           pool={pool}
           vms={vms}
           pending={save.isPending || remove.isPending}
@@ -101,7 +109,7 @@ function PoolEditor({
       <div className='flex flex-wrap items-center gap-2'>
         <Input
           value={name}
-          placeholder='池名称'
+          placeholder='分组名称'
           className='max-w-xs'
           onChange={(e) => setName(e.target.value)}
         />
@@ -208,7 +216,7 @@ function VmChecks({
               )
             }}
           />
-          {vm.id}
+          {vm.email || vm.name || vm.id} · {vm.id}
         </label>
       ))}
     </div>

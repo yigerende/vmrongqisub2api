@@ -162,6 +162,7 @@ export type VmMachine = {
 }
 
 export type Vm = {
+  group_names?: string[]
   quality?: import('@/features/vm/quality-types').QualitySnapshot
   id: string
   name?: string

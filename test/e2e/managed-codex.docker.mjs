@@ -9,6 +9,7 @@ import crypto from 'node:crypto'
 import net from 'node:net'
 import { execFileSync } from 'node:child_process'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
+import { VmPoolsRepo } from '../../src/lib/db/repos/vm-pools-repo.mjs'
 import { createManagedCodex, importManagedCodex, handleManagedCodex } from '../../src/lib/admin/managed-codex.mjs'
 import { getVm, patchVmRecord, summarizeVm } from '../../src/lib/vm/vm-registry.mjs'
 import { changeVmQualitySchedule } from '../../src/lib/admin/vm-quality-schedule.mjs'
@@ -67,6 +68,9 @@ test(`real one-slot ${kvm ? 'KVM' : 'Docker'}: idempotency, guest kernel, reauth
   process.env.KIN_CODEX_KERNEL_BIN = path.resolve('bin/kin-codex-kernel')
   const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8' }).trim()
   openDatabase({ dataDir: path.join(root, 'data') })
+  const groups = new VmPoolsRepo()
+  const groupA = groups.insert({ name: 'Team' }),
+    groupB = groups.insert({ name: 'Pro' })
   const proxyPool = new ProxyPool({ dataDir: path.join(root, 'data') })
   proxyPool.ensureLocal()
   const create = (body) => createManagedCodex(root, body, {}, proxyPool)
@@ -79,17 +83,18 @@ test(`real one-slot ${kvm ? 'KVM' : 'Docker'}: idempotency, guest kernel, reauth
     execution_mode: kvm ? 'kvm_per_slot' : 'docker_per_slot',
     kernel: guestOS,
     proxy_id: 'px-local',
+    group_ids: [groupA.id, groupB.id],
     machine: { memory: kvm ? '1g' : '512m', vcpus: 2, disk_gb: 20 },
   }
   let vm
   let other
   let socks
-  const call = async (method, action, body = {}) => {
+  const call = async (method, action, body = {}, slot = vm) => {
     let out
     await handleManagedCodex({
-      req: { method, headers: { 'x-space-assignment': vm.assignment_id } },
+      req: { method, headers: { 'x-space-assignment': slot.assignment_id } },
       res: {},
-      url: new URL(`http://localhost/api/panel/vms/${vm.id}${action ? '/' + action : ''}`),
+      url: new URL(`http://localhost/api/panel/vms/${slot.id}${action ? '/' + action : ''}`),
       cfg: { paths: { project: root } },
       routing: {},
       proxyPool,
@@ -152,6 +157,8 @@ test(`real one-slot ${kvm ? 'KVM' : 'Docker'}: idempotency, guest kernel, reauth
     assert.ok(!info.Mounts.some((m) => /docker.sock/.test(m.Source)))
     assert.equal(guest(vm, 'cat', '/etc/machine-id'), vm.fingerprint.guest_machine_id)
     assert.equal((await call('POST', 'schedulable', { schedulable: true })).status, 200)
+    for (const group of [groupA, groupB]) assert.deepEqual(groups.get(group.id).vm_ids, [vm.id])
+    groups.setMembers(groupA.id, [])
     const statePath = path.join(root, 'vms', vm.id, 'run', 'container-state.json')
     const kernelBeforeQuota = JSON.parse(fs.readFileSync(statePath, 'utf8'))
     const inFlight = tryAcquireOpenAISlot(vm.id, { concurrency: 2 })
@@ -234,6 +241,9 @@ test(`real one-slot ${kvm ? 'KVM' : 'Docker'}: idempotency, guest kernel, reauth
     })
     assert.equal(getVm(root, vm.id).schedulable, false)
     assert.equal((await inspectManagedContainer(vm)).id, a.container.id)
+    assert.equal((await call('POST', 'schedulable', { schedulable: true })).status, 200)
+    assert.deepEqual(groups.get(groupA.id).vm_ids, [], 'reauth and resume preserve operator membership edits')
+    assert.deepEqual(groups.get(groupB.id).vm_ids, [vm.id])
     socks = await refusingSocks()
     const gateway = JSON.parse(docker('network', 'inspect', 'bridge'))[0].IPAM.Config[0].Gateway
     const chosenProxy = proxyPool.importLines(`${gateway}:${socks.port}`).items[0].id
@@ -246,6 +256,8 @@ test(`real one-slot ${kvm ? 'KVM' : 'Docker'}: idempotency, guest kernel, reauth
     assert.notEqual(other.container_name, vm.container_name)
     assert.notEqual(other.fingerprint.device_id, vm.fingerprint.device_id)
     await importManagedCodex(root, other, credential)
+    assert.equal((await call('POST', 'schedulable', { schedulable: true }, other)).status, 200)
+    assert.deepEqual(groups.get(groupB.id).vm_ids, [vm.id, other.id].sort())
     if (kvm) {
       assert.notEqual(guest(vm, 'cat', '/etc/machine-id'), guest(other, 'cat', '/etc/machine-id'))
       assert.notEqual(
@@ -294,6 +306,7 @@ test(`real one-slot ${kvm ? 'KVM' : 'Docker'}: idempotency, guest kernel, reauth
       assert.equal(readCodexAccounts(root, other.id)[0].refresh_token, credential.refresh_token)
       assert.equal(proxyPool.getProxyForVm(vm.id), null, 'successful deletion releases the local binding')
       assert.equal(proxyPool.getProxyForVm(other.id).id, chosenProxy, 'other slots retain their bindings')
+      for (const group of [groupA, groupB]) assert.deepEqual(groups.get(group.id).vm_ids, [other.id])
       assert.equal(openAIRuntimeSignals(vm.id).inFlight, 1, 'the held request has not drained')
     } finally {
       activeAtDelete.release()

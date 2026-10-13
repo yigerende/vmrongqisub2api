@@ -72,6 +72,7 @@ export function summarizeVm(vm, projectRoot = null, routing = null) {
     execution_mode: vm.execution_mode || null,
     container_name: vm.container_name || null,
     pool_id: vm.pool_id || null,
+    group_ids: vm.group_ids || (vm.pool_id ? [vm.pool_id] : []),
     name: vm.name,
     status: vm.status || 'unknown',
     kernel: vm.kernel || null,

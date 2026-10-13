@@ -27,6 +27,7 @@ import { PageHeader } from '@/components/page-header'
 import { SlotIdentity } from '@/components/platform-chip'
 import { QueryGate } from '@/components/query-gate'
 import { meQueryOptions } from '@/features/auth/queries'
+import { VmPoolsCard, vmPoolsQueryOptions } from '@/features/keys/vm-pools-card'
 import { usageQueryOptions } from '@/features/overview/queries'
 import { CreateVmDialog } from '@/features/vm/create-vm-dialog'
 import { FleetPulse } from '@/features/vm/fleet-pulse'
@@ -64,6 +65,12 @@ export function VmListPage() {
   const qc = useQueryClient()
   const [q, setQ] = useState('')
   const [filter, setFilter] = useState('all')
+  const [groupId, setGroupId] = useState('all')
+  const groupsQ = useQuery({
+    ...vmPoolsQueryOptions(),
+    enabled: me.data?.role === 'admin',
+    refetchInterval: 5000,
+  })
   const [kind, setKind] = useState<VmKindFilter>('all')
   const [view, setView] = useState<'grid' | 'list'>('list')
   const [sort, setSort] = useState<VmSortKey>('status')
@@ -98,14 +105,32 @@ export function VmListPage() {
     },
     onError: (error: Error) => toast.error(error.message),
   })
-  const vms: Vm[] = vmsQ.data?.items || []
+  const groups = groupsQ.data?.pools || []
+  const namesByVm = new Map<string, string[]>()
+  for (const group of groups)
+    for (const id of group.vm_ids)
+      namesByVm.set(id, [...(namesByVm.get(id) || []), group.name])
+  const vms: Vm[] = (vmsQ.data?.items || []).map((vm) => ({
+    ...vm,
+    group_names: namesByVm.get(vm.id) || [],
+  }))
+  const groupMembers = new Set(
+    groups.find((g) => g.id === groupId)?.vm_ids || []
+  )
+  const groupedVms =
+    groupId === 'all' ? vms : vms.filter((vm) => groupMembers.has(vm.id))
   const poolQueue = vmsQ.data?.pool_queue
   const accounts = usage.data?.accounts
   const canCreate =
     me.data?.role === 'admin' ||
     (me.data?.role === 'user' && (me.data.vm_create_quota || 0) > 0)
-  const scoped = filterVms(vms, '', 'all', kind)
-  const list = sortVms(filterVms(vms, q, filter, kind), sort, dir, accounts)
+  const scoped = filterVms(groupedVms, '', 'all', kind)
+  const list = sortVms(
+    filterVms(groupedVms, q, filter, kind),
+    sort,
+    dir,
+    accounts
+  )
 
   return (
     <PageHeader
@@ -138,6 +163,12 @@ export function VmListPage() {
         error={vmsQ.error}
         skeleton={<VmListSkeleton />}
       >
+        {me.data?.role === 'admin' ? (
+          <details className='mb-3'>
+            <summary className='cursor-pointer text-sm'>管理账号分组</summary>
+            <VmPoolsCard vms={vms} />
+          </details>
+        ) : null}
         <FleetPulse
           className='mb-3'
           vms={scoped}
@@ -148,6 +179,26 @@ export function VmListPage() {
         <div className='mb-4 flex flex-wrap items-center gap-2'>
           {me.data?.role === 'admin' ? <VmQualitySettings /> : null}
           <KindFilterChips vms={vms} kind={kind} onChange={setKind} />
+          {me.data?.role === 'admin' ? (
+            <Select value={groupId} onValueChange={setGroupId}>
+              <SelectTrigger
+                size='sm'
+                className='w-40'
+                aria-label='账号分组筛选'
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value='all'>全部分组</SelectItem>
+                {groups.map((g) => (
+                  <SelectItem key={g.id} value={g.id}>
+                    {g.name}
+                    {g.enabled ? '' : ' · 停用'}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          ) : null}
           <Separator orientation='vertical' className='mx-1 h-5' />
           <Input
             className='h-8 w-64'

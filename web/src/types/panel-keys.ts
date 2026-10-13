@@ -35,6 +35,7 @@ export type ApiKeyItem = {
 }
 
 export type VmPool = {
+  updated_at?: string
   id: string
   name: string
   enabled: boolean

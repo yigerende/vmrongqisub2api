@@ -410,6 +410,14 @@ function SlotCell({ vm }: { vm: Vm }) {
   return (
     <div className='min-w-0 space-y-0.5 overflow-hidden'>
       <SlotIdentity vm={vm} compact className='text-sm font-medium' />
+      {vm.group_names?.length ? (
+        <p
+          className='truncate text-[11px] text-muted-foreground'
+          title={vm.group_names.join(' / ')}
+        >
+          {vm.group_names.join(' / ')}
+        </p>
+      ) : null}
       <div className='flex min-w-0 items-center gap-1.5'>
         <TierBadge vm={vm} />
         <RuntimeChip vm={vm} />

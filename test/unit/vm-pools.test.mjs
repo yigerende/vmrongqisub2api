@@ -30,11 +30,9 @@ test('pool membership is shared by keys and applied on the next read', () => {
     const after = applyVmPool(keyScopeFromRecord(store.getById(other.id)), (id) => repo.get(id))
     assert.deepEqual(after.allowed_vms, ['vm-03'])
     assert.equal(after.vm_pool_error, null)
-    assert.throws(() => createVmPool(repo, { name: 'Pool B', vm_ids: ['vm-03'] }, vms), /其他账号池/)
-    assert.equal(
-      repo.list().some((item) => item.name === 'Pool B'),
-      false,
-    )
+    const shared = createVmPool(repo, { name: 'Pool B', vm_ids: ['vm-03'] }, vms)
+    assert.deepEqual(repo.get(shared.id).vm_ids, ['vm-03'])
+    assert.deepEqual(repo.get(pool.id).vm_ids, ['vm-03'])
     updateVmPool(repo, pool.id, { enabled: false }, vms)
     const disabled = applyVmPool(keyScopeFromRecord(store.getById(key.id)), (id) => repo.get(id))
     assert.equal(disabled.vm_pool_error, 'disabled')
