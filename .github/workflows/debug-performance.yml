@@ -1,0 +1,36 @@
+name: debug logging performance
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  concurrency:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: debug regression and restore tests
+        run: node --test test/unit/log-details.test.mjs test/unit/request-log.test.mjs test/unit/log-writer.test.mjs test/unit/report-reader.test.mjs test/unit/backup-service.test.mjs test/unit/db-migration-sub2api.test.mjs
+      - name: 200 and 400 concurrent streams with large debug records and retention
+        run: >-
+          node scripts/bench-concurrency.mjs --levels=200,400 --seconds=60 --stream-ms=3000
+          --history=10000 --log-mode=debug --body-chars=190000 --chunk-chars=1000
+          --debug-history=5500 --cleanup-ms=7000
+          --max-ttft-ms=2000 --max-dispatch-ms=250 --max-loop-ms=1000
+          --output=debug-concurrency.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: debug-concurrency
+          path: debug-concurrency.json

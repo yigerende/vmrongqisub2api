@@ -17,11 +17,13 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { redactSecrets } from '../core/security.mjs'
+import { buildDebugRecord, summarizeBody, redactHeaders, clampBody } from './debug-record.mjs'
+export { sanitizeRequestBodySnapshot } from './debug-record.mjs'
 import { resolveStoreDb } from '../db/database.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
 import { ReportReader } from '../db/report-reader.mjs'
 import { LogWriter } from '../db/log-writer.mjs'
+import { LogDetails } from '../db/log-details.mjs'
 import { persistLogBatch } from '../db/persist-log-batch.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
 import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
@@ -84,28 +86,6 @@ function safeIp(req) {
   return String(raw).slice(0, 45)
 }
 
-function summarizeBody(body) {
-  if (!body || typeof body !== 'object') return { empty: true }
-  const messages = Array.isArray(body.messages) ? body.messages : null
-  const roles = messages ? messages.map((m) => m?.role).filter(Boolean) : []
-  let systemLen = 0
-  if (typeof body.system === 'string') systemLen = body.system.length
-  else if (Array.isArray(body.system)) {
-    systemLen = body.system.reduce((n, b) => n + (typeof b === 'string' ? b.length : (b?.text || '').length), 0)
-  }
-  return {
-    model: body.model || null,
-    stream: !!body.stream,
-    max_tokens: body.max_tokens ?? body.max_output_tokens ?? null,
-    messages_count: messages ? messages.length : body.input != null ? 1 : 0,
-    roles,
-    tools_count: Array.isArray(body.tools) ? body.tools.length : 0,
-    has_thinking: body.thinking != null,
-    system_len: systemLen,
-    top_level_keys: Object.keys(body).sort(),
-  }
-}
-
 /**
  * Cache-creation TTL breakdown, normalized like Sub2API:
  * prefer usage.cache_creation.ephemeral_5m/1h; when the breakdown is absent
@@ -143,166 +123,6 @@ function modelMismatch(requested, upstream) {
   return norm(requested) === norm(upstream) ? 0 : 1
 }
 
-function redactHeaders(headers = {}) {
-  const out = {}
-  for (const [k, v] of Object.entries(headers)) {
-    const key = String(k).toLowerCase()
-    if (key === 'authorization' || key === 'x-api-key' || key === 'cookie' || key === 'set-cookie') {
-      out[key] = '***REDACTED***'
-    } else if (key === 'x-panel-token') {
-      out[key] = '***REDACTED***'
-    } else {
-      out[key] = typeof v === 'string' ? v.slice(0, 512) : v
-    }
-  }
-  return out
-}
-
-const SENSITIVE_KEY = /authorization|token|password|secret|cookie|api[_-]?key/i
-const SNAP_MAX_STRING = 80
-const SNAP_MAX_ARRAY = 24
-const SNAP_MAX_DEPTH = 6
-const SNAP_MAX_TOTAL = 12000
-const IMAGE_DATA_KEYS = new Set(['data', 'base64', 'b64_json'])
-
-function imagePayloadSummary(value) {
-  if (typeof value === 'string') return `…[${value.length} bytes]`
-  return '[omitted-image]'
-}
-
-function redactImagePayloads(value, seen = new WeakSet()) {
-  if (!value || typeof value !== 'object') return value
-  if (seen.has(value)) return '[Circular]'
-  seen.add(value)
-  if (Array.isArray(value)) return value.map((item) => redactImagePayloads(item, seen))
-  const type = value.type
-  const isImage = type === 'image' || type === 'input_image' || type === 'image_url' || value.source || value.image_url
-  const out = {}
-  for (const [key, nested] of Object.entries(value)) {
-    if (IMAGE_DATA_KEYS.has(key) && typeof nested === 'string' && nested.length > 32) {
-      out[key] = imagePayloadSummary(nested)
-      continue
-    }
-    if (isImage && key === 'source' && nested && typeof nested === 'object') {
-      out[key] = {
-        type: nested.type || 'base64',
-        media_type: nested.media_type || null,
-        url: Boolean(nested.url),
-        bytes: typeof nested.data === 'string' ? nested.data.length : 0,
-      }
-      continue
-    }
-    if (isImage && key === 'image_url' && nested && typeof nested === 'object') {
-      out[key] = { url: Boolean(nested.url), detail: nested.detail || null }
-      continue
-    }
-    out[key] = redactImagePayloads(nested, seen)
-  }
-  return out
-}
-
-export function sanitizeRequestBodySnapshot(value, opts = {}, seen = new WeakSet(), depth = 0) {
-  const maxString = opts.maxStringChars ?? SNAP_MAX_STRING
-  const maxArray = opts.maxArrayItems ?? SNAP_MAX_ARRAY
-  const maxDepth = opts.maxDepth ?? SNAP_MAX_DEPTH
-  if (value == null) return value
-  if (typeof value === 'string') {
-    return value.length > maxString ? value.slice(0, maxString) + `…[${value.length}]` : value
-  }
-  if (typeof value !== 'object') return value
-  if (seen.has(value)) return '[Circular]'
-  if (depth >= maxDepth) return '[MaxDepth]'
-  seen.add(value)
-  if (Array.isArray(value)) {
-    const items = value.slice(0, maxArray).map((v) => sanitizeRequestBodySnapshot(v, opts, seen, depth + 1))
-    if (value.length > maxArray) items.push(`…[${value.length - maxArray} more]`)
-    return items
-  }
-  const out = {}
-  const isImage =
-    value.type === 'image' ||
-    value.type === 'input_image' ||
-    value.type === 'image_url' ||
-    value.source ||
-    value.image_url
-  for (const [k, v] of Object.entries(value)) {
-    if (SENSITIVE_KEY.test(k)) {
-      out[k] = '[REDACTED]'
-      continue
-    }
-    if (k === 'encrypted_content') {
-      out[k] = `…[${String(v || '').length} chars]`
-      continue
-    }
-    if (k === 'tools' && Array.isArray(v)) {
-      out[k] = v
-        .slice(0, maxArray)
-        .map((t) => ({ type: t?.type || 'function', name: t?.name || t?.function?.name || null }))
-      continue
-    }
-    if (IMAGE_DATA_KEYS.has(k) && typeof v === 'string' && v.length > 32) {
-      out[k] = imagePayloadSummary(v)
-      continue
-    }
-    if (isImage && k === 'source' && v && typeof v === 'object') {
-      out[k] = {
-        type: v.type || 'base64',
-        media_type: v.media_type || null,
-        url: Boolean(v.url),
-        bytes: typeof v.data === 'string' ? v.data.length : 0,
-      }
-      continue
-    }
-    out[k] = sanitizeRequestBodySnapshot(v, opts, seen, depth + 1)
-  }
-  let raw = ''
-  try {
-    raw = JSON.stringify(out)
-  } catch {
-    return out
-  }
-  if (raw.length > (opts.maxTotalChars ?? SNAP_MAX_TOTAL)) {
-    return { _truncated: true, _chars: raw.length, preview: raw.slice(0, opts.maxTotalChars ?? SNAP_MAX_TOTAL) }
-  }
-  return out
-}
-
-function clampBody(obj, maxChars = 200_000) {
-  let raw
-  try {
-    raw = redactSecrets(redactImagePayloads(obj))
-  } catch {
-    raw = '{"error":"redact_failed"}'
-  }
-  if (raw.length <= maxChars) {
-    try {
-      return JSON.parse(raw)
-    } catch {
-      return { _raw: raw.slice(0, maxChars) }
-    }
-  }
-  return { _truncated: true, _chars: raw.length, preview: raw.slice(0, maxChars) }
-}
-
-/**
- * Client-facing response as stored in a debug record. The body stays raw text
- * (SSE frames or JSON) so the panel can show exactly what went out; only
- * credential-shaped substrings are masked.
- */
-function debugResponse(captured) {
-  let body = captured.body || ''
-  try {
-    body = JSON.parse(redactSecrets(body))
-  } catch {}
-  return {
-    status: captured.status ?? null,
-    headers: captured.headers || null,
-    body,
-    bytes: captured.bytes || 0,
-    truncated: !!captured.truncated,
-  }
-}
-
 export function resolveLogMode(envMode, req) {
   const hdr = String(req?.headers?.['x-kin-log'] || '')
     .trim()
@@ -324,13 +144,23 @@ export function newRequestId(req) {
 export class RequestLogStore {
   enableWriter(dbPath) {
     this.writerPath = dbPath
+    this._autoCheckpoint = Number(this.db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint)
+    this.db.exec('PRAGMA wal_autocheckpoint = 0')
     this.writer = new LogWriter(dbPath, (rows) => persistLogBatch(this.db, this.repo, rows))
+    this.details = new LogDetails(dbPath, { root: this.root })
   }
 
   async closeWriter() {
     const writer = this.writer
-    this.writer = null
-    await writer?.close()
+    const details = this.details
+    try {
+      const results = await Promise.allSettled([writer?.close(), details?.close()])
+      for (const result of results) if (result.status === 'rejected') throw result.reason
+    } finally {
+      this.writer = null
+      this.details = null
+      if (Number.isFinite(this._autoCheckpoint)) this.db.exec(`PRAGMA wal_autocheckpoint = ${this._autoCheckpoint}`)
+    }
   }
 
   enableReader(dbPath) {
@@ -340,6 +170,7 @@ export class RequestLogStore {
   async read(method, ...args) {
     if (this.readerPaused) throw Object.assign(new Error('reporting is paused for restore'), { status: 503 })
     await this.writer?.flush()
+    if (method === 'getDebug' || method === 'listDebug') await this.details?.flush()
     if (this.readerPaused) throw Object.assign(new Error('reporting is paused for restore'), { status: 503 })
     if (!this.readerPath) return this[method](...args)
     this.reader ||= new ReportReader(this.readerPath)
@@ -468,24 +299,28 @@ export class RequestLogStore {
   tapResponse(ctx, res) {
     if (!ctx || ctx.mode !== 'debug' || !res || ctx.response) return
     const limit = Math.max(0, this.maxDebugBodyChars)
-    const captured = { status: null, headers: null, body: '', bytes: 0, truncated: false }
+    const captured = { status: null, headers: null, chunks: [], length: 0, limit, bytes: 0, truncated: false }
     ctx.response = captured
-    const decoder = new TextDecoder()
+    // Keep bounded raw bytes. UTF-8 decoding/redaction/JSON run in the detail
+    // worker, not for every streamed frame on the scheduling event loop.
+    const byteLimit = limit * 4
     const take = (chunk, encoding) => {
       if (chunk == null || typeof chunk === 'function') return
       const buf =
         typeof chunk === 'string' ? Buffer.from(chunk, typeof encoding === 'string' ? encoding : 'utf8') : chunk
       if (!(buf instanceof Uint8Array)) return
       captured.bytes += buf.byteLength
-      if (captured.truncated) return
-      const room = limit - captured.body.length
-      const text = decoder.decode(buf, { stream: true })
-      if (text.length <= room) {
-        captured.body += text
-        return
+      let offset = 0
+      while (offset < buf.byteLength && captured.length < byteLimit) {
+        const within = captured.length % 16384
+        if (!within) captured.chunks.push(Buffer.alloc(Math.min(16384, byteLimit - captured.length)))
+        const target = captured.chunks.at(-1)
+        const n = Math.min(buf.byteLength - offset, target.length - within)
+        target.set(buf.subarray(offset, offset + n), within)
+        captured.length += n
+        offset += n
       }
-      captured.body += text.slice(0, Math.max(0, room))
-      captured.truncated = true
+      if (offset < buf.byteLength) captured.truncated = true
     }
     const write = res.write
     const end = res.end
@@ -585,42 +420,40 @@ export class RequestLogStore {
     try {
       if (!this.writer) this.repo.insertSummaryIfAbsent(summary)
     } catch {}
-    if (this.jsonlMirror) this._appendJsonl(summary)
     this._mem.push(summary)
     if (this._mem.length > this._memMax) this._mem = this._mem.slice(-this._memMax)
 
-    let debugRec = null
-    if (ctx.mode === 'debug') {
-      debugRec = {
-        ...summary,
-        headers: ctx.headers,
-        inbound_summary: extra.inbound_summary || summarizeBody(extra.inbound_body),
-        request_body_snapshot:
-          !extra.classifier && extra.inbound_body != null ? sanitizeRequestBodySnapshot(extra.inbound_body) : null,
-        inbound_body:
-          !extra.classifier && extra.inbound_body != null
-            ? clampBody(extra.inbound_body, this.maxDebugBodyChars)
-            : null,
-        hop_meta: extra.hop_meta || null,
-        via: extra.via || extra.hop_meta?.via || null,
-        upstream_status: extra.upstream_status ?? null,
-        outbound_summary: extra.outbound_summary || null,
-        cache_prefix: extra.cache_prefix || null,
-        cache_continuity: extra.cache_continuity || null,
-        classifier: extra.classifier || null,
-        outbound_headers:
-          ctx.capture_outbound && extra.outbound_headers != null ? redactHeaders(extra.outbound_headers) : null,
-        outbound_body:
-          ctx.capture_outbound && !extra.classifier && extra.outbound_body != null
-            ? clampBody(extra.outbound_body, this.maxDebugBodyChars)
-            : null,
-        response: ctx.response ? debugResponse(ctx.response) : null,
+    const debug =
+      ctx.mode === 'debug'
+        ? {
+            ctx: { headers: ctx.headers, capture_outbound: ctx.capture_outbound, response: ctx.response },
+            extra: {
+              inbound_body: extra.classifier ? null : extra.inbound_body,
+              inbound_summary: extra.inbound_summary,
+              hop_meta: extra.hop_meta,
+              via: extra.via,
+              upstream_status: extra.upstream_status,
+              outbound_summary: extra.outbound_summary,
+              cache_prefix: extra.cache_prefix,
+              cache_continuity: extra.cache_continuity,
+              classifier: extra.classifier,
+              outbound_headers: ctx.capture_outbound ? extra.outbound_headers : null,
+              outbound_body: ctx.capture_outbound && !extra.classifier ? extra.outbound_body : null,
+            },
+            maxDebugBodyChars: this.maxDebugBodyChars,
+          }
+        : null
+    if (this.details) {
+      if (debug || this.jsonlMirror) this.details.enqueue({ summary, debug, jsonl: this.jsonlMirror })
+    } else if (!this.writerPath) {
+      // Standalone/offline store compatibility. A stopped production worker must
+      // never redirect large payloads or file writes onto the gateway thread.
+      if (debug) {
+        try {
+          this.repo.insertDebug(summary.request_id || summary.id, summary.ts, buildDebugRecord(summary, debug))
+        } catch {}
       }
-      try {
-        // Keep mutable debug records ordered on the owner connection. Replaying
-        // an older worker batch must never overwrite a newer repeated request id.
-        this.repo.insertDebug(summary.request_id || summary.id, summary.ts, debugRec)
-      } catch {}
+      if (this.jsonlMirror) this._appendJsonl(summary)
     }
     try {
       this.writer?.enqueue({ summary })
@@ -750,6 +583,7 @@ export class RequestLogStore {
       recent_normal: this._mem.length,
       backend: 'sqlite',
       jsonl_mirror: this.jsonlMirror,
+      detail_writer: this.details?.snapshot() || null,
       total_rows: (() => {
         if (!count) return null
         try {
@@ -763,12 +597,19 @@ export class RequestLogStore {
 
   /** Retention: delete rows older than retain windows, then enforce max_mb. */
   cleanup() {
-    try {
-      this.repo.cleanup({
-        retainDays: this.retainDays,
-        debugRetainDays: this.debugRetainDays,
-        maxBytes: this.maxMb > 0 ? this.maxMb * 1024 * 1024 : 0,
+    const options = {
+      retainDays: this.retainDays,
+      debugRetainDays: this.debugRetainDays,
+      maxBytes: this.maxMb > 0 ? this.maxMb * 1024 * 1024 : 0,
+    }
+    if (this.details)
+      return this.details.cleanup(options).catch((error) => {
+        console.warn('[request-log] background cleanup failed:', error?.code || error?.message)
+        return null
       })
+    if (this.writerPath) return null
+    try {
+      this.repo.cleanup(options)
     } catch {}
     this._cleanupLegacyFiles(this.retainDays, this.root)
     this._cleanupLegacyFiles(this.debugRetainDays, path.join(this.root, 'debug'))

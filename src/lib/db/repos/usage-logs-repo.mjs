@@ -9,6 +9,7 @@
  */
 
 import { getDb } from '../database.mjs'
+import { decodeDebugJson } from '../debug-codec.mjs'
 import { collectErrors, enrichLogRow, excludeErrorClassSql, ingressAuthSql } from '../../admin/error-class.mjs'
 import {
   calculateCost,
@@ -258,7 +259,8 @@ export class UsageLogsRepo {
     this._vmOwner = db.prepare('SELECT owner_user_id FROM vms WHERE id = ?')
     this._listDebug = db.prepare('SELECT record_json FROM request_log_debug ORDER BY ts DESC LIMIT ?')
     this._getByRequestId = db.prepare('SELECT * FROM usage_logs WHERE request_id = ?')
-    this._debugBytes = db.prepare('SELECT COALESCE(SUM(LENGTH(record_json)), 0) AS n FROM request_log_debug')
+    this._debugBytes = db.prepare(`SELECT COALESCE(SUM(LENGTH(CAST(record_json AS BLOB))), 0) AS n
+      FROM request_log_debug INDEXED BY idx_reqdbg_retention`)
     this._debugCount = db.prepare('SELECT COUNT(*) AS n FROM request_log_debug')
     this._deleteOldUsage = db.prepare('DELETE FROM usage_logs WHERE created_at < ?')
     this._deleteOldDebug = db.prepare('DELETE FROM request_log_debug WHERE ts < ?')
@@ -267,6 +269,14 @@ export class UsageLogsRepo {
         SELECT request_id FROM request_log_debug ORDER BY ts ASC LIMIT ?
       )
     `)
+    this._oldestDebugSizes = db.prepare(`SELECT request_id, LENGTH(CAST(record_json AS BLOB)) AS bytes
+      FROM request_log_debug INDEXED BY idx_reqdbg_retention ORDER BY ts, request_id LIMIT ?`)
+    this._deleteDebug = db.prepare('DELETE FROM request_log_debug WHERE request_id = ?')
+    this._deleteUsageBatch = db.prepare(`DELETE FROM usage_logs WHERE id IN (
+      SELECT id FROM usage_logs WHERE created_at < ? ORDER BY created_at LIMIT ?
+    )`)
+    this._oldDebugBatch = db.prepare(`SELECT request_id, LENGTH(CAST(record_json AS BLOB)) AS bytes
+      FROM request_log_debug INDEXED BY idx_reqdbg_retention WHERE ts < ? ORDER BY ts, request_id LIMIT ?`)
   }
 
   /** Cheap EXISTS: ≥1 2xx row visible to the caller (same ownerPred as request-log stats). */
@@ -311,7 +321,11 @@ export class UsageLogsRepo {
   }
 
   insertDebug(requestId, ts, record) {
-    this._insertDebug.run(requestId, ts || new Date().toISOString(), JSON.stringify(record))
+    this.insertDebugJson(requestId, ts, JSON.stringify(record))
+  }
+
+  insertDebugJson(requestId, ts, json) {
+    this._insertDebug.run(requestId, ts || new Date().toISOString(), json)
   }
 
   insertDebugIfAbsent(requestId, ts, record) {
@@ -322,7 +336,7 @@ export class UsageLogsRepo {
     const row = this._getDebug.get(requestId)
     if (!row) return null
     try {
-      return enrichLogRow(JSON.parse(row.record_json))
+      return enrichLogRow(decodeDebugJson(row.record_json))
     } catch {
       return null
     }
@@ -336,7 +350,7 @@ export class UsageLogsRepo {
         .all(n)
         .map((r) => {
           try {
-            return enrichLogRow(JSON.parse(r.record_json))
+            return enrichLogRow(decodeDebugJson(r.record_json))
           } catch {
             return null
           }
@@ -355,7 +369,7 @@ export class UsageLogsRepo {
       .all(...own.params, n)
       .map((r) => {
         try {
-          return enrichLogRow(JSON.parse(r.record_json))
+          return enrichLogRow(decodeDebugJson(r.record_json))
         } catch {
           return null
         }
@@ -1291,24 +1305,63 @@ export class UsageLogsRepo {
    * Number form `cleanup(7)` keeps the old retainDays-only call.
    */
   cleanup(opts = {}) {
-    const cfg = this._cleanupOpts(opts)
-    const usage_logs = this._deleteOldUsage.run(cfg.usageCutoff).changes
-    const debug_by_age = this._deleteOldDebug.run(cfg.debugCutoff).changes
-    const debug_by_size = this.trimDebugToMaxBytes(cfg.maxBytes)
-    if (usage_logs + debug_by_age + debug_by_size > 0) {
-      try {
-        this.db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
-      } catch {}
-    }
-    try {
-      this.db.exec('PRAGMA optimize')
-    } catch {}
+    const state = this.beginCleanup(opts)
+    while (!this.cleanupStep(state)) {}
+    return state.result
+  }
+
+  beginCleanup(opts = {}) {
     return {
-      usage_logs,
-      request_log_debug: debug_by_age + debug_by_size,
-      debug_by_age,
-      debug_by_size,
+      ...this._cleanupOpts(opts),
+      stage: 'usage',
+      excess: null,
+      result: { usage_logs: 0, request_log_debug: 0, debug_by_age: 0, debug_by_size: 0 },
     }
+  }
+
+  /** One short transaction at a time; the background caller yields between steps. */
+  cleanupStep(state) {
+    if (state.stage === 'usage') {
+      const n = this._deleteUsageBatch.run(state.usageCutoff, 128).changes
+      state.result.usage_logs += n
+      if (n === 128) return false
+      state.stage = 'age'
+      return false
+    }
+    if (state.stage === 'age') {
+      const rows = this._oldDebugBatch.all(state.debugCutoff, 8)
+      if (rows.length) {
+        state.result.debug_by_age += this._deleteDebugChunk(rows).count
+        state.result.request_log_debug = state.result.debug_by_age + state.result.debug_by_size
+        return false
+      }
+      state.stage = 'size'
+    }
+    if (state.maxBytes <= 0) return true
+    // Snapshot the excess once. Concurrent new writes are bounded on the next
+    // cleanup; don't chase an ever-growing target or repeatedly scan blobs.
+    state.excess ??= Math.max(0, this.debugBytes() - state.maxBytes)
+    if (state.excess <= 0) return true
+    const rows = this._oldestDebugSizes.all(8)
+    if (!rows.length) return true
+    const removed = this._deleteDebugChunk(rows, state.excess)
+    state.excess -= removed.bytes
+    state.result.debug_by_size += removed.count
+    state.result.request_log_debug = state.result.debug_by_age + state.result.debug_by_size
+    return false
+  }
+
+  _deleteDebugChunk(rows, target = Infinity) {
+    let bytes = 0,
+      count = 0
+    // Cap both row count and bytes so a debug cleanup never owns a multi-GB lock.
+    for (const row of rows) {
+      const changed = this._deleteDebug.run(row.request_id).changes
+      count += changed
+      if (changed) bytes += Number(row.bytes)
+      if (bytes >= Math.min(target, 512 * 1024)) break
+    }
+    return { bytes, count }
   }
 
   _cleanupOpts(opts) {
@@ -1331,23 +1384,14 @@ export class UsageLogsRepo {
     return Number(this._debugCount.get().n || 0)
   }
 
-  /** Delete oldest debug rows until SUM(LENGTH(record_json)) <= maxBytes. */
+  /** Delete oldest debug rows using the covering retention index. */
   trimDebugToMaxBytes(maxBytes) {
     const cap = Math.max(0, Number(maxBytes) || 0)
     if (cap <= 0) return 0
-    let deleted = 0
-    for (let i = 0; i < 8; i++) {
-      const used = this.debugBytes()
-      if (used <= cap) return deleted
-      const count = this.countDebug()
-      if (!count) return deleted
-      const avg = Math.max(1, Math.floor(used / count))
-      const need = Math.min(count, Math.max(1, Math.ceil((used - cap) / avg) + 1))
-      const n = this._deleteOldestDebug.run(need).changes
-      if (!n) return deleted
-      deleted += n
-    }
-    return deleted
+    const state = this.beginCleanup({ maxBytes: cap })
+    state.stage = 'size'
+    while (!this.cleanupStep(state)) {}
+    return state.result.debug_by_size
   }
 
   count() {

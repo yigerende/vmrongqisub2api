@@ -4,7 +4,9 @@ import { UsageLogsRepo } from './repos/usage-logs-repo.mjs'
 import { persistLogBatch } from './persist-log-batch.mjs'
 
 const db = new DatabaseSync(workerData.dbPath)
-db.exec('PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON')
+db.exec(
+  'PRAGMA busy_timeout = 5000; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA wal_autocheckpoint = 0',
+)
 const repo = new UsageLogsRepo(db)
 parentPort.on('message', ({ id, rows }) => {
   try {

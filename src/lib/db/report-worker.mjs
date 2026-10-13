@@ -26,7 +26,7 @@ const allowed = {
   statistics: new Set(['statistics', 'leaderboard']),
 }
 const db = new DatabaseSync(workerData.dbPath)
-db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 5000')
+db.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 5000; PRAGMA wal_autocheckpoint = 0')
 const logs = new RequestLogStore({ db })
 const stats = new StatisticsRepo(db)
 

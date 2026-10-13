@@ -22,12 +22,22 @@ const root = process.env.KIN_PROJECT_ROOT
 if (!root || !path.basename(root).startsWith('vm2api-bench-')) throw new Error('isolated benchmark root required')
 const workers = Number(process.env.BENCH_WORKERS || 0)
 const db = openDatabase({ dbPath: path.join(root, 'kin.db') })
-const log = new RequestLogStore({ db, dataDir: root })
+const log = new RequestLogStore({
+  db,
+  dataDir: root,
+  mode: process.env.BENCH_LOG_MODE || 'normal',
+  maxMb: Number(process.env.BENCH_LOG_MAX_MB || 2048),
+})
 if (workers) log.enableReader(path.join(root, 'kin.db'))
 const upstream = new Worker(new URL('./performance-upstream.mjs', import.meta.url), {
   workerData: {
     root,
-    options: { delayMs: 50, chunks: Math.ceil(Number(process.env.BENCH_STREAM_MS || 3000) / 100), intervalMs: 100 },
+    options: {
+      delayMs: 50,
+      chunks: Math.ceil(Number(process.env.BENCH_STREAM_MS || 3000) / 100),
+      intervalMs: 100,
+      chunkChars: Number(process.env.BENCH_CHUNK_CHARS || 0),
+    },
   },
 })
 const { socketPath, tokenPath } = await new Promise((resolve, reject) => {
@@ -64,7 +74,7 @@ const stats = { requests: 0, errors: 0, by_route: {} }
 const history = Number(process.env.BENCH_HISTORY || 10000)
 db.exec('BEGIN')
 for (let i = 0; i < history; i++)
-  log.finish(log.start({ headers: { 'x-request-id': `history-${i}` } }), {
+  log.finish(log.start({ headers: { 'x-request-id': `history-${i}`, 'x-kin-log': 'normal' } }), {
     vm_id: ids[i % ids.length],
     status: 200,
     first_token_ms: i % 200,
@@ -72,12 +82,28 @@ for (let i = 0; i < history; i++)
     usage: { input_tokens: 100, output_tokens: 30 },
   })
 db.exec('COMMIT')
+const debugHistory = Number(process.env.BENCH_DEBUG_HISTORY || 0)
+// Separate transactions avoid holding one giant write lock while seeding GBs.
+for (let i = 0; i < debugHistory; i++) {
+  log.repo.insertDebug(`history-${i}`, new Date(Date.now() - 86400_000).toISOString(), { blob: 'd'.repeat(400000) })
+}
 if (workers) log.enableWriter(path.join(root, 'kin.db'))
 await startStreamWorkers({ size: workers, cancel: cancelWorkerRequest })
 const lag = monitorEventLoopDelay({ resolution: 10 })
 lag.enable()
+const dispatchDelays = []
+const serverFirstToken = []
+const p95 = (values) => (values.length ? [...values].sort((a, b) => a - b)[Math.ceil(values.length * 0.95) - 1] : null)
 let peakInflight = 0,
-  maxSlotInflight = 0
+  maxSlotInflight = 0,
+  cleanupRuns = 0
+const cleanupMs = Number(process.env.BENCH_CLEANUP_MS || 0)
+const cleanupTimer = cleanupMs
+  ? setInterval(() => {
+      cleanupRuns++
+      log.cleanup()
+    }, cleanupMs)
+  : null
 const sample = setInterval(() => {
   const counts = ids.map((id) => openAIRuntimeSignals(id).inFlight)
   peakInflight = Math.max(
@@ -96,6 +122,7 @@ const server = http.createServer(async (req, res) => {
     if (req.url === '/healthz') return json(res, 200, { ok: true })
     if (req.url === '/metrics') {
       await log.writer?.flush()
+      await log.details?.flush()
       return json(res, 200, {
         ...stats,
         peakInflight,
@@ -106,6 +133,12 @@ const server = http.createServer(async (req, res) => {
         logs: log.count() - history,
         runtime: streamWorkerPool()?.snapshot() || null,
         rssMb: Math.round(process.memoryUsage().rss / 1024 / 1024),
+        cleanupRuns,
+        logWriter: { fallbacks: log.writer?.fallbacks || 0 },
+        debugWriter: log.details?.snapshot() || null,
+        debugBytes: log.repo.debugBytes(),
+        dispatchP95Ms: p95(dispatchDelays),
+        serverFirstTokenP95Ms: p95(serverFirstToken),
       })
     }
     if (req.url === '/api/panel/vms') {
@@ -127,8 +160,12 @@ const server = http.createServer(async (req, res) => {
     req.apiKeyKind = 'master'
     const body = await readBody(req, 1024 * 1024)
     const ctx = log.start(req, { protocol: 'openai.responses', pathName: req.url })
-    const bag = { model: body.model, stream: true }
-    res.once('finish', () => log.finish(ctx, { ...bag, status: res.statusCode }))
+    log.tapResponse(ctx, res)
+    const bag = { model: body.model, stream: true, inbound_body: body }
+    res.once('finish', () => {
+      log.finish(ctx, { ...bag, status: res.statusCode })
+      if (Number.isFinite(bag.first_token_ms)) serverFirstToken.push(bag.first_token_ms)
+    })
     await handleCodexProtocol({
       req,
       res,
@@ -144,9 +181,16 @@ const server = http.createServer(async (req, res) => {
       stickyRouter,
       sessions,
       requestStartedAt: ctx.t0,
+      captureOutbound: ctx.capture_outbound,
       // Docker lifecycle is deliberately simulated. Every byte still traverses
       // the production socket client, SSE parser, protocol handler and scheduler.
-      ops: { writeCodexKernelConfig: () => {}, ensureCodexKernel: async () => ({ ok: true }) },
+      ops: {
+        writeCodexKernelConfig: () => {},
+        ensureCodexKernel: async () => {
+          dispatchDelays.push(Date.now() - ctx.t0)
+          return { ok: true }
+        },
+      },
     })
   } catch (error) {
     stats.errors++
@@ -159,6 +203,7 @@ process.on('message', async (message) => {
   if (message !== 'stop') return
   await new Promise((resolve) => server.close(resolve))
   clearInterval(sample)
+  clearInterval(cleanupTimer)
   lag.disable()
   await streamWorkerPool()?.close()
   await log.closeWriter()

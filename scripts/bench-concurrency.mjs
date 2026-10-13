@@ -29,6 +29,12 @@ const child = fork(new URL('../test/helpers/performance-gateway.mjs', import.met
     BENCH_WORKERS: String(workers),
     BENCH_STREAM_MS: String(streamMs),
     BENCH_HISTORY: arg('history', 10000),
+    BENCH_LOG_MODE: arg('log-mode', 'normal'),
+    BENCH_DEBUG_HISTORY: arg('debug-history', 0),
+    BENCH_BODY_CHARS: arg('body-chars', 2000),
+    BENCH_CHUNK_CHARS: arg('chunk-chars', 0),
+    BENCH_CLEANUP_MS: arg('cleanup-ms', 0),
+    BENCH_LOG_MAX_MB: arg('log-max-mb', 2048),
   },
   execArgv: arg('profile', '') ? ['--cpu-prof', `--cpu-prof-dir=${path.resolve(arg('profile', ''))}`] : [],
   stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
@@ -54,27 +60,27 @@ try {
       failures = []
     let completed = 0,
       finished = false
-    const panelRun = (async () => {
-      const routes = ['/api/panel/vms', '/api/panel/request-logs/stats', '/api/panel/usage-logs', '/healthz']
-      let cursor = 0
-      while (!finished) {
-        const route = routes[cursor++ % routes.length]
-        const start = performance.now()
-        try {
-          const response = await fetch(base + route, { signal: AbortSignal.timeout(30000) })
-          await response.text()
-          panel.push({
-            route,
-            ms: performance.now() - start,
-            status: response.status,
-            handlerMs: Number(response.headers.get('x-bench-handler-ms') || 0),
-          })
-        } catch (error) {
-          panel.push({ route, ms: performance.now() - start, status: 0, error: error.message })
+    const routes = ['/api/panel/vms', '/api/panel/request-logs/stats', '/api/panel/usage-logs', '/healthz']
+    const panelRun = Promise.all(
+      routes.map(async (route) => {
+        while (!finished) {
+          const start = performance.now()
+          try {
+            const response = await fetch(base + route, { signal: AbortSignal.timeout(30000) })
+            await response.text()
+            panel.push({
+              route,
+              ms: performance.now() - start,
+              status: response.status,
+              handlerMs: Number(response.headers.get('x-bench-handler-ms') || 0),
+            })
+          } catch (error) {
+            panel.push({ route, ms: performance.now() - start, status: 0, error: error.message })
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500))
         }
-        await new Promise((resolve) => setTimeout(resolve, 150))
-      }
-    })()
+      }),
+    )
     await Promise.all(
       Array.from({ length: concurrency }, async (_, lane) => {
         do {
@@ -87,7 +93,11 @@ try {
                 'content-type': 'application/json',
                 'x-session-id': `lane-${concurrency}-${lane}`,
               },
-              body: JSON.stringify({ model: 'gpt-6.1-sol', input: 'benchmark '.repeat(200), stream: true }),
+              body: JSON.stringify({
+                model: 'gpt-6.1-sol',
+                input: 'b'.repeat(Number(arg('body-chars', 2000))),
+                stream: true,
+              }),
               signal: AbortSignal.timeout(streamMs + 60000),
             })
             let first = true,
@@ -123,6 +133,9 @@ try {
       concurrency,
       seconds,
       streamMs,
+      logMode: arg('log-mode', 'normal'),
+      bodyChars: Number(arg('body-chars', 2000)),
+      debugHistory: Number(arg('debug-history', 0)),
       completed,
       failures: failures.length,
       failureExamples: failures.slice(0, 3),
@@ -161,6 +174,10 @@ try {
       metrics.remaining ||
       metrics.logs !== requests ||
       metrics.maxSlotInflight > 16 ||
+      metrics.debugWriter?.dropped_records ||
+      report.ttftP95Ms > Number(arg('max-ttft-ms', Infinity)) ||
+      metrics.dispatchP95Ms > Number(arg('max-dispatch-ms', Infinity)) ||
+      metrics.loopMaxMs > Number(arg('max-loop-ms', Infinity)) ||
       Object.values(report.panelByRoute).some((route) => route.p95Ms > 1000)
     )
       process.exitCode = 1

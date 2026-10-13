@@ -4,7 +4,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 
 /** Isolated fake upstream; supports Windows named pipes as well as Unix sockets. */
-export async function fakeStreamKernel(root, { delayMs = 5, chunks = 8, intervalMs = 5 } = {}) {
+export async function fakeStreamKernel(root, { delayMs = 5, chunks = 8, intervalMs = 5, chunkChars = 0 } = {}) {
   const socketPath =
     process.platform === 'win32' ? `\\\\.\\pipe\\vm2api-test-${randomUUID()}` : path.join(root, 'fake.sock')
   const tokenPath = path.join(root, 'internal.token')
@@ -48,7 +48,12 @@ export async function fakeStreamKernel(root, { delayMs = 5, chunks = 8, interval
     const emit = (event) => res.write(`data: ${JSON.stringify(event)}\n\n`)
     emit({ type: 'response.created', response: { id: 'fake', model: value.body?.model, output: [] } })
     for (let i = 0; i < chunks && !res.destroyed; i++) {
-      emit({ type: 'response.output_text.delta', output_index: 0, content_index: 0, delta: `hello-${i} ` })
+      emit({
+        type: 'response.output_text.delta',
+        output_index: 0,
+        content_index: 0,
+        delta: chunkChars ? 'a'.repeat(chunkChars) : `hello-${i} `,
+      })
       await new Promise((resolve) => setTimeout(resolve, intervalMs))
     }
     if (!res.destroyed) {
