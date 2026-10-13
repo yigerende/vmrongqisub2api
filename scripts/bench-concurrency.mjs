@@ -106,7 +106,10 @@ try {
             if (response.status !== 200 || !terminal) failures.push(response.status)
             else completed++
           } catch (error) {
-            failures.push(error.message)
+            failures.push(`${error.message}${error.cause?.code ? ` (${error.cause.code})` : ''}`)
+            // Preserve the configured load shape after a failed connection;
+            // do not turn a closed socket into an unbounded retry flood.
+            await new Promise((resolve) => setTimeout(resolve, 100))
           }
         } while (performance.now() < deadline)
       }),
