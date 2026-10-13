@@ -210,9 +210,18 @@ test('guest kernel uses persisted SOCKS credentials, requires the proxy, and ref
 test('failure to save a new slot releases its reservation without unbinding other slots', async (t) => {
   const { root, proxyPool } = environment(t)
   proxyPool.bind('px-local', 'unrelated-slot')
-  fs.writeFileSync(path.join(root, 'vms'), 'not a directory')
   const body = input()
+  const bind = proxyPool.bind.bind(proxyPool)
+  const reservation = t.mock.method(proxyPool, 'bind', (proxyId, vmId) => {
+    const result = bind(proxyId, vmId)
+    assert.equal(result.ok, true)
+    assert.equal(proxyPool.getProxyForVm(vmId).id, 'px-local')
+    // Fail the save after reservation, not the earlier cached record lookup.
+    fs.writeFileSync(path.join(root, 'vms'), 'not a directory')
+    return result
+  })
   await assert.rejects(createManagedCodex(root, body, {}, proxyPool), { code: 'EEXIST' })
+  assert.equal(reservation.mock.callCount(), 1)
   assert.equal(proxyPool.getProxyForVm(assignmentId(body)), null)
   assert.equal(proxyPool.getProxyForVm('unrelated-slot').id, 'px-local')
 })
