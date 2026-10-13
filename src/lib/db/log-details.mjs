@@ -12,7 +12,7 @@ export function detailBytes(value, limit) {
     else if (item && typeof item === 'object') {
       if (seen.has(item)) return
       seen.add(item)
-      if (ArrayBuffer.isView(item)) bytes += item.byteLength + 64
+      if (ArrayBuffer.isView(item) || item instanceof ArrayBuffer) bytes += item.byteLength + 64
       else {
         bytes += 64
         for (const key in item) {
@@ -35,7 +35,7 @@ export class LogDetails {
     {
       root,
       maxRows = 1024,
-      maxBytes = 128 * 1024 * 1024,
+      maxBytes = 512 * 1024 * 1024,
       maxRecordBytes = 16 * 1024 * 1024,
       timeoutMs = 30000,
       retryMs = 250,
@@ -45,7 +45,9 @@ export class LogDetails {
   ) {
     Object.assign(this, { dbPath, root, maxRows, maxBytes, maxRecordBytes, timeoutMs, retryMs, createWorker })
     this.queue = []
+    this.batches = []
     this.bytes = 0
+    this.peakBytes = 0
     this.enqueued = 0
     this.persisted = 0
     this.waiters = []
@@ -78,28 +80,30 @@ export class LogDetails {
           this.ready = true
           this.pump()
         } else if (message.type === 'cleanup') {
+          clearTimeout(this.maintenanceTimer)
           const pending = this.maintenance
           this.maintenance = null
           if (message.error) pending?.reject(new Error(message.error))
           else pending?.resolve(message.result)
           this.settled()
-        } else if (this.batch && message.id === this.batch.sequence) {
+        } else if (this.batches.length && message.id === this.batches[0].sequence) {
           if (message.error) {
             workerError = new Error(message.error)
             void worker.terminate() // Wait for exit before replay; no two writers race.
             return
           }
           clearTimeout(this.timer)
-          this.persisted = this.batch.sequence
+          const batch = this.batches.shift()
+          this.persisted = batch.sequence
           if (message.omitted) {
             this.dropped += message.omitted
             this.warn('debug/JSONL record omitted (usage summary retained)', 'payload could not be serialized')
           }
-          this.bytes -= this.batch.bytes
+          this.bytes -= batch.bytes
           this.workerMetrics = message.metrics || this.workerMetrics
-          this.batch = null
           this.error = null
           this.pump()
+          if (this.batches.length) this.armTimeout()
         }
         this.settled()
       })
@@ -120,10 +124,11 @@ export class LogDetails {
 
   failed(error) {
     clearTimeout(this.timer)
+    clearTimeout(this.maintenanceTimer)
     this.error = error
     this.failures++
-    if (this.batch) this.queue.unshift(...this.batch.entries)
-    this.batch = null
+    this.queue.unshift(...this.batches.flatMap((batch) => batch.entries))
+    this.batches = []
     for (const waiter of this.waiters.splice(0)) waiter.reject(error)
     this.maintenance?.reject(error)
     this.maintenance = null
@@ -150,7 +155,7 @@ export class LogDetails {
     if (this.closed || this.closing) return false
     let bytes
     try {
-      if (this.queue.length + (this.batch?.entries.length || 0) >= this.maxRows)
+      if (this.queue.length + this.batches.reduce((n, batch) => n + batch.entries.length, 0) >= this.maxRows)
         throw new RangeError('debug queue full')
       bytes = detailBytes(job, Math.min(this.maxRecordBytes, this.maxBytes - this.bytes))
       // Snapshot before finish() returns: later mutation cannot change this record.
@@ -162,6 +167,7 @@ export class LogDetails {
     }
     this.queue.push({ job, bytes, sequence: ++this.enqueued })
     this.bytes += bytes
+    this.peakBytes = Math.max(this.peakBytes, this.bytes)
     this.worker?.ref()
     if (!this.scheduled) {
       this.scheduled = true
@@ -175,26 +181,33 @@ export class LogDetails {
 
   pump() {
     if (!this.ready || !this.worker) return
+    const inFlight = this.batches.length
     if (this.maintenance && !this.maintenance.sent) {
       this.maintenance.sent = true
       this.worker.ref()
+      this.maintenanceTimer = setTimeout(() => {
+        void this.worker?.terminate()
+      }, 120000)
+      this.maintenanceTimer.unref()
       this.worker.postMessage({ type: 'cleanup', options: this.maintenance.options })
     }
-    if (this.batch || !this.queue.length) return
-    const entries = []
-    let bytes = 0
-    // Amortize IPC, keep each batch small enough that raw payload cloning and
-    // the SQLite write transaction cannot monopolize another request's turn.
-    while (this.queue.length && entries.length < 8) {
-      const next = this.queue[0]
-      if (entries.length && bytes + next.bytes > 2 * 1024 * 1024) break
-      entries.push(this.queue.shift())
-      bytes += next.bytes
+    // A small window keeps the worker fed while the owner is busy forwarding
+    // frames. Retain every unacknowledged batch, in order, for crash replay.
+    while (this.batches.length < 4 && this.queue.length) {
+      const entries = []
+      let bytes = 0
+      while (this.queue.length && entries.length < 8) {
+        const next = this.queue[0]
+        if (entries.length && bytes + next.bytes > 4 * 1024 * 1024) break
+        entries.push(this.queue.shift())
+        bytes += next.bytes
+      }
+      const batch = { entries, bytes, sequence: entries.at(-1).sequence }
+      this.batches.push(batch)
+      this.worker.ref()
+      this.worker.postMessage({ id: batch.sequence, jobs: entries.map((entry) => entry.job) })
     }
-    this.batch = { entries, bytes, sequence: entries.at(-1).sequence }
-    this.worker.ref()
-    this.armTimeout()
-    this.worker.postMessage({ id: this.batch.sequence, jobs: entries.map((entry) => entry.job) })
+    if (!inFlight && this.batches.length) this.armTimeout()
   }
 
   cleanup(options) {
@@ -217,7 +230,7 @@ export class LogDetails {
       waiter.resolve()
       return false
     })
-    if (!this.batch && !this.queue.length && !this.maintenance) this.worker?.unref()
+    if (!this.batches.length && !this.queue.length && !this.maintenance) this.worker?.unref()
   }
 
   flush() {
@@ -232,8 +245,10 @@ export class LogDetails {
 
   snapshot() {
     return {
-      queued_records: this.queue.length + (this.batch?.entries.length || 0),
+      queued_records: this.queue.length + this.batches.reduce((n, batch) => n + batch.entries.length, 0),
       queued_bytes: this.bytes,
+      peak_queued_bytes: this.peakBytes,
+      max_queue_bytes: this.maxBytes,
       dropped_records: this.dropped,
       failures: this.failures,
       restarts: this.restarts,
@@ -251,8 +266,55 @@ export class LogDetails {
       this.closed = true
       clearTimeout(this.timer)
       clearTimeout(this.retryTimer)
+      clearTimeout(this.maintenanceTimer)
       await this.worker?.terminate()
       this.worker = null
+    }
+  }
+}
+
+/** Hash by request id: repeated debug records always share one ordered writer. */
+export class LogDetailsPool {
+  constructor(dbPath, options = {}) {
+    this.writers = Array.from({ length: 2 }, () => new LogDetails(dbPath, { ...options, maxBytes: 256 * 1024 * 1024 }))
+  }
+
+  enqueue(job) {
+    const id = String(job.summary.request_id || job.summary.id || '')
+    let hash = 2166136261
+    for (let i = 0; i < id.length; i++) hash = Math.imul(hash ^ id.charCodeAt(i), 16777619)
+    return this.writers[(hash >>> 0) % this.writers.length].enqueue(job)
+  }
+
+  flush() {
+    return Promise.all(this.writers.map((writer) => writer.flush()))
+  }
+
+  cleanup(options) {
+    return this.writers[0].cleanup(options)
+  }
+
+  async close() {
+    const results = await Promise.allSettled(this.writers.map((writer) => writer.close()))
+    for (const result of results) if (result.status === 'rejected') throw result.reason
+  }
+
+  snapshot() {
+    const workers = this.writers.map((writer) => writer.snapshot())
+    const counters = [
+      'queued_records',
+      'queued_bytes',
+      'peak_queued_bytes',
+      'max_queue_bytes',
+      'dropped_records',
+      'failures',
+      'restarts',
+      'persisted_records',
+    ]
+    return {
+      ...Object.fromEntries(counters.map((key) => [key, workers.reduce((n, worker) => n + worker[key], 0)])),
+      cleanup_running: workers.some((worker) => worker.cleanup_running),
+      workers,
     }
   }
 }

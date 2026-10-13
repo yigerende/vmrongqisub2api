@@ -23,7 +23,7 @@ import { resolveStoreDb } from '../db/database.mjs'
 import { UsageLogsRepo } from '../db/repos/usage-logs-repo.mjs'
 import { ReportReader } from '../db/report-reader.mjs'
 import { LogWriter } from '../db/log-writer.mjs'
-import { LogDetails } from '../db/log-details.mjs'
+import { LogDetailsPool } from '../db/log-details.mjs'
 import { persistLogBatch } from '../db/persist-log-batch.mjs'
 import { classifyRequestError, resolveMutedErrorClasses } from './error-class.mjs'
 import { costColumnsFromUsage, normalizeUsage } from './pricing.mjs'
@@ -147,7 +147,7 @@ export class RequestLogStore {
     this._autoCheckpoint = Number(this.db.prepare('PRAGMA wal_autocheckpoint').get().wal_autocheckpoint)
     this.db.exec('PRAGMA wal_autocheckpoint = 0')
     this.writer = new LogWriter(dbPath, (rows) => persistLogBatch(this.db, this.repo, rows))
-    this.details = new LogDetails(dbPath, { root: this.root })
+    this.details = new LogDetailsPool(dbPath, { root: this.root })
   }
 
   async closeWriter() {

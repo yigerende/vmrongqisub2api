@@ -43,6 +43,22 @@ function cleanupFiles(days, dir) {
   }
 }
 
+const batches = []
+let writing = false
+async function pump() {
+  if (writing) return
+  writing = true
+  try {
+    while (batches.length) {
+      const { id, jobs } = batches.shift()
+      if (!(await writeBatch(id, jobs))) return // Stop until the owner reaps us.
+    }
+    writing = false
+  } catch (error) {
+    throw error
+  }
+}
+
 parentPort.on('message', async ({ id, jobs, type, options }) => {
   if (type === 'cleanup') {
     if (maintenance) return
@@ -69,6 +85,11 @@ parentPort.on('message', async ({ id, jobs, type, options }) => {
     }
     return
   }
+  batches.push({ id, jobs })
+  void pump()
+})
+
+async function writeBatch(id, jobs) {
   try {
     const start = performance.now()
     // Prepare every JSON before acquiring the write lock. Small transactions
@@ -89,17 +110,27 @@ parentPort.on('message', async ({ id, jobs, type, options }) => {
     }
     metrics.prepare_ms += performance.now() - start
     const writeAt = performance.now()
-    db.exec('BEGIN IMMEDIATE')
-    try {
-      for (const job of records)
-        if (job.json) {
-          repo.insertDebugJson(job.summary.request_id || job.summary.id, job.summary.ts, job.json)
-          writtenBytes += Buffer.byteLength(job.json)
+    let cursor = 0
+    while (cursor < records.length) {
+      let transactionBytes = 0
+      db.exec('BEGIN IMMEDIATE')
+      try {
+        while (cursor < records.length) {
+          const job = records[cursor++]
+          if (job.json) {
+            repo.insertDebugJson(job.summary.request_id || job.summary.id, job.summary.ts, job.json)
+            const bytes = Buffer.byteLength(job.json)
+            writtenBytes += bytes
+            transactionBytes += bytes
+          }
+          if (transactionBytes >= 512 * 1024) break
         }
-      db.exec('COMMIT')
-    } catch (error) {
-      if (db.isTransaction) db.exec('ROLLBACK')
-      throw error
+        db.exec('COMMIT')
+      } catch (error) {
+        if (db.isTransaction) db.exec('ROLLBACK')
+        throw error
+      }
+      if (cursor < records.length) await delay(2)
     }
     for (const job of records)
       if (job.jsonl && workerData.root) {
@@ -110,8 +141,10 @@ parentPort.on('message', async ({ id, jobs, type, options }) => {
     metrics.write_ms += performance.now() - writeAt
     checkpoint()
     parentPort.postMessage({ id, metrics, omitted })
+    return true
   } catch (error) {
     parentPort.postMessage({ id, error: error.message })
+    return false
   }
-})
+}
 parentPort.postMessage({ type: 'ready' })

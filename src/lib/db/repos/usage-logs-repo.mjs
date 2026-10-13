@@ -262,20 +262,15 @@ export class UsageLogsRepo {
     this._debugBytes = db.prepare(`SELECT COALESCE(SUM(LENGTH(CAST(record_json AS BLOB))), 0) AS n
       FROM request_log_debug INDEXED BY idx_reqdbg_retention`)
     this._debugCount = db.prepare('SELECT COUNT(*) AS n FROM request_log_debug')
-    this._deleteOldUsage = db.prepare('DELETE FROM usage_logs WHERE created_at < ?')
-    this._deleteOldDebug = db.prepare('DELETE FROM request_log_debug WHERE ts < ?')
-    this._deleteOldestDebug = db.prepare(`
-      DELETE FROM request_log_debug WHERE request_id IN (
-        SELECT request_id FROM request_log_debug ORDER BY ts ASC LIMIT ?
-      )
-    `)
-    this._oldestDebugSizes = db.prepare(`SELECT request_id, LENGTH(CAST(record_json AS BLOB)) AS bytes
+    this._oldestDebugSizes = db.prepare(`SELECT request_id, ts, LENGTH(CAST(record_json AS BLOB)) AS bytes
       FROM request_log_debug INDEXED BY idx_reqdbg_retention ORDER BY ts, request_id LIMIT ?`)
-    this._deleteDebug = db.prepare('DELETE FROM request_log_debug WHERE request_id = ?')
+    this._deleteDebug = db.prepare(
+      'DELETE FROM request_log_debug WHERE request_id = ? AND ts = ? AND LENGTH(CAST(record_json AS BLOB)) = ?',
+    )
     this._deleteUsageBatch = db.prepare(`DELETE FROM usage_logs WHERE id IN (
       SELECT id FROM usage_logs WHERE created_at < ? ORDER BY created_at LIMIT ?
     )`)
-    this._oldDebugBatch = db.prepare(`SELECT request_id, LENGTH(CAST(record_json AS BLOB)) AS bytes
+    this._oldDebugBatch = db.prepare(`SELECT request_id, ts, LENGTH(CAST(record_json AS BLOB)) AS bytes
       FROM request_log_debug INDEXED BY idx_reqdbg_retention WHERE ts < ? ORDER BY ts, request_id LIMIT ?`)
   }
 
@@ -1356,7 +1351,7 @@ export class UsageLogsRepo {
       count = 0
     // Cap both row count and bytes so a debug cleanup never owns a multi-GB lock.
     for (const row of rows) {
-      const changed = this._deleteDebug.run(row.request_id).changes
+      const changed = this._deleteDebug.run(row.request_id, row.ts, row.bytes).changes
       count += changed
       if (changed) bytes += Number(row.bytes)
       if (bytes >= Math.min(target, 512 * 1024)) break
