@@ -20,6 +20,7 @@ export const SETTINGS_TABS = [
   ['pool', '账号池'],
   ['quota', '配额'],
   ['logs', '日志'],
+  ['request-limits', '请求限流'],
   ['protocol', '协议'],
   ['whitelist', '白名单'],
   ['init', '初装'],
@@ -68,6 +69,7 @@ export const SETTINGS_NAV_GROUPS: {
   {
     label: '运维',
     items: [
+      { id: 'request-limits', icon: Gauge },
       { id: 'notify', icon: BellRing },
       { id: 'logs', icon: ScrollText },
       { id: 'backup', icon: Archive },

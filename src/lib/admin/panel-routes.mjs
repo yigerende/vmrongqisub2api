@@ -236,6 +236,7 @@ import { rustKernelHealth, toPublicKernelHealth } from '../transport/rust-kernel
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { setManualScheduleWins } from '../pool/schedule-policy.mjs'
 import { normalizeHealthProbeConfig } from './health-probe.mjs'
+import { handleRequestLimits } from './request-limits.mjs'
 import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
 import { mergeNotifyConfig, publicNotifyConfig, publicRoutingNotify, sendNotifyTest } from './notify.mjs'
 import { UsageLogsView } from '../db/repos/usage-logs-view.mjs'
@@ -1070,6 +1071,7 @@ export function createPanelHandler(ctx) {
         )
       }
       if (await handleVmQuality({ req, res, url, monitor: ctx.qualityMonitor, readBody, json })) return true
+      if (await handleRequestLimits({ req, res, url, limits: ctx.requestLimits, readBody, json })) return true
       if (await handleManagedCodex({ req, res, url, cfg, routing: ctx.routingConfig, proxyPool, readBody, json }))
         return true
       if ((req.method === 'GET' || req.method === 'PUT') && p === '/api/panel/onboarding') {

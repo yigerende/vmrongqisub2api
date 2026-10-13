@@ -142,8 +142,6 @@ export function loadConfig() {
       upstream_timeout_ms: Number(process.env.KIN_UPSTREAM_TIMEOUT || 600000),
       stream_idle_timeout_ms: streamIdleTimeoutMs(),
       stream_keepalive_ms: Number(process.env.KIN_STREAM_KEEPALIVE || 10000),
-      rate_capacity: Number(process.env.KIN_RATE_CAP || 60),
-      rate_refill: Number(process.env.KIN_RATE_REFILL || 1),
     },
     // Admin/status snapshot of the *active* VM only.
     // Inference must use buildExecutionContext() — never this object.

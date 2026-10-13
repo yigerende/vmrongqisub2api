@@ -42,6 +42,7 @@ import {
   routingQueryOptions,
 } from '@/features/settings/queries'
 import { QuotaTierPane } from '@/features/settings/quota-tier-pane'
+import { RequestLimitsPane } from '@/features/settings/request-limits-pane'
 import { SaveBar } from '@/features/settings/save-bar'
 import { SettingsNav } from '@/features/settings/settings-nav'
 import { SettingsSkeleton } from '@/features/settings/settings-skeleton'
@@ -183,6 +184,7 @@ export function SettingsPage() {
     Object.keys(draft).length > 0 &&
     JSON.stringify(draft) !== serverJson
   const hideSave =
+    tab === 'request-limits' ||
     tab === 'socks5' ||
     tab === 'telemetry' ||
     tab === 'backup' ||
@@ -426,6 +428,7 @@ export function SettingsPage() {
                 />
               ) : null}
               {tab === 'telemetry' ? <TelemetryPane /> : null}
+              {tab === 'request-limits' ? <RequestLimitsPane /> : null}
               {tab === 'socks5' ? <Socks5Pane /> : null}
               {tab === 'backup' ? <BackupPane /> : null}
               {tab === 'about' ? <AboutPane /> : null}

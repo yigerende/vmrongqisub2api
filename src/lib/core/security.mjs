@@ -34,22 +34,40 @@ export function extractApiKey(req) {
 }
 
 /** Simple token bucket per key */
-export function createRateLimiter({ capacity = 60, refillPerSec = 1 } = {}) {
+export function createRateLimiter({ capacity = 60, refillPerSec = 1, enabled = true, now = Date.now } = {}) {
   const buckets = new Map()
-  return function allow(key) {
-    const now = Date.now()
+  function refill(bucket, at) {
+    bucket.tokens = Math.min(capacity, bucket.tokens + (Math.max(0, at - bucket.updated) / 1000) * refillPerSec)
+    bucket.updated = at
+  }
+  function allow(key) {
+    if (!enabled) return true
+    const at = now()
     let b = buckets.get(key)
     if (!b) {
-      b = { tokens: capacity, updated: now }
+      b = { tokens: capacity, updated: at }
       buckets.set(key, b)
     }
-    const elapsed = (now - b.updated) / 1000
-    b.tokens = Math.min(capacity, b.tokens + elapsed * refillPerSec)
-    b.updated = now
+    refill(b, at)
     if (b.tokens < 1) return false
     b.tokens -= 1
     return true
   }
+  // Settle elapsed time at the old rate. Saving settings never refills a drained
+  // bucket, and editing another scope cannot reset this scope's allowance.
+  allow.configure = (next) => {
+    if (capacity === next.capacity && refillPerSec === next.refillPerSec && enabled === next.enabled) return
+    const at = now()
+    for (const b of buckets.values()) {
+      refill(b, at)
+      b.tokens = Math.min(next.capacity, b.tokens)
+    }
+    capacity = next.capacity
+    refillPerSec = next.refillPerSec
+    enabled = next.enabled
+    if (!enabled) buckets.clear()
+  }
+  return allow
 }
 
 export const HOP_BY_HOP = new Set([

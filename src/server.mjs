@@ -14,7 +14,7 @@ import { loadConfig, reloadActiveVm, routingConfigFile } from './lib/core/config
 import {
   extractApiKey,
   timingSafeEqualStr,
-  createRateLimiter,
+  hashKey,
   verifyPanelSession,
   extractPanelToken,
   attachPanelAuth,
@@ -101,6 +101,7 @@ import { createPanelHandler } from './lib/admin/panel-routes.mjs'
 import { createVmQualityMonitor } from './lib/admin/vm-quality.mjs'
 import { changeVmQualitySchedule } from './lib/admin/vm-quality-schedule.mjs'
 import { runVmQualityProbe } from './lib/admin/vm-quality-probe.mjs'
+import { createRequestLimits, requestLimitScope } from './lib/admin/request-limits.mjs'
 
 const FEATURES = [
   'passthrough',
@@ -134,11 +135,6 @@ if (!getPanelAdmin().password) {
 }
 fs.mkdirSync(cfg.paths.captures, { recursive: true })
 
-const allowRate = createRateLimiter({
-  capacity: cfg.limits.rate_capacity,
-  refillPerSec: cfg.limits.rate_refill,
-})
-
 // --- Persistent store (SQLite, sub2api-inspired) ---
 const dataDir = cfg.paths.data || path.join(cfg.paths.root, 'data')
 openDatabase({ dataDir })
@@ -149,6 +145,7 @@ try {
 }
 // one-time migration of legacy JSON files (data/*.json + request-logs) into the DB
 const legacyImport = runLegacyImport({ dataDir, projectRoot: cfg.paths.project })
+const requestLimits = createRequestLimits()
 if (legacyImport?.imported) {
   console.log('[db] legacy JSON import done:', JSON.stringify(legacyImport.counts || {}))
 }
@@ -656,6 +653,22 @@ function rejectAuth(req, res, error) {
   return false
 }
 
+function allowGatewayRequest(req, res, identity) {
+  const scope = requestLimitScope(req.url)
+  if (requestLimits.allow(scope, identity)) return true
+  return rejectAuth(
+    req,
+    res,
+    makeError({
+      type: ErrorType.RATE_LIMIT,
+      code: ErrorCode.GATEWAY_RATE_LIMIT,
+      message: 'Gateway rate limit exceeded. Retry later.',
+      status: 429,
+      details: { scope },
+    }),
+  )
+}
+
 function requireAuth(req, res) {
   req.presentedApiKey = extractApiKey(req)
   const token = extractPanelToken(req) || req.presentedApiKey
@@ -674,43 +687,19 @@ function requireAuth(req, res) {
   // Panel session
   const session = verifyPanelSession(token)
   if (session) {
-    if (!allowRate('panel:' + session.user)) {
-      return rejectAuth(
-        req,
-        res,
-        makeError({
-          type: ErrorType.RATE_LIMIT,
-          code: ErrorCode.GATEWAY_RATE_LIMIT,
-          message: 'Gateway rate limit exceeded. Retry later.',
-          status: 429,
-        }),
-      )
-    }
     req.panelUser = session.user
     req.panelRole = session.role || panelUsers.getByUsername(session.user)?.role || 'user'
     const rec = panelUsers.getByUsername(session.user)
     req.panelUserId = rec?.id || null
     req.panelVmCreateQuota = rec?.vm_create_quota ?? 0
-    return true
+    return allowGatewayRequest(req, res, 'user:' + session.user)
   }
   // Master env API key — unlimited admin
   if (timingSafeEqualStr(token, cfg.api_key)) {
-    if (!allowRate(token)) {
-      return rejectAuth(
-        req,
-        res,
-        makeError({
-          type: ErrorType.RATE_LIMIT,
-          code: ErrorCode.GATEWAY_RATE_LIMIT,
-          message: 'Gateway rate limit exceeded. Retry later.',
-          status: 429,
-        }),
-      )
-    }
     req.apiKeyKind = 'master'
     req.panelRole = 'admin'
     req.panelUser = 'master'
-    return true
+    return allowGatewayRequest(req, res, 'key:' + hashKey(token))
   }
 
   // Managed multi-keys (sub2api-style)
@@ -747,21 +736,9 @@ function requireAuth(req, res) {
       }),
     )
   }
-  if (!allowRate(token)) {
-    return rejectAuth(
-      req,
-      res,
-      makeError({
-        type: ErrorType.RATE_LIMIT,
-        code: ErrorCode.GATEWAY_RATE_LIMIT,
-        message: 'Gateway rate limit exceeded. Retry later.',
-        status: 429,
-      }),
-    )
-  }
   req.apiKeyKind = 'managed'
   req.apiKeyRecord = managed.record
-  return true
+  return allowGatewayRequest(req, res, 'key:' + hashKey(token))
 }
 
 function fetchWorkerModels(opts) {
@@ -868,6 +845,7 @@ const qualityMonitor = createVmQualityMonitor({
 })
 
 const handlePanel = createPanelHandler({
+  requestLimits,
   qualityMonitor,
   json,
   writeSSEHeaders,

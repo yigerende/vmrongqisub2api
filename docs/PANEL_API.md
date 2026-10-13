@@ -18,6 +18,17 @@
 
 `vms/*.json` 的 `owner_user_id` / `origin`（`platform` \| `admin_assigned` \| `user_created`）是属主 SSOT。`PATCH /vms/:id/owner` 仅 admin。自建 VM 不能收回进平台池。
 
+## 请求限流
+
+设置 → 运维 → 请求限流。仅 admin / master 可 GET/PUT `/api/panel/request-limits`。
+
+- GET 返回 `data.api` 和 `data.panel`，各含 `{ enabled, rpm, burst, source }`。`source` 为 `web`、`environment` 或 `default`。
+- PUT 按入口保存，例如 `{ "api": { "enabled": true, "rpm": 600, "burst": 100 } }`；未提交的入口保持不变。`{ "api": null }` 恢复该入口的环境默认值。
+- **API、管理面板默认都不限制**。`enabled: false` 关闭该入口限流；开启时 `rpm` 为持续补充速度（0.001–1000000 次/分钟），`burst` 为突发容量（1–1000000 整数）。保存至 SQLite `settings.gateway_request_limits`，立即生效并在重启后保留；保存本身不会补满已用完的额度。
+- 配置优先级：页面保存 > 环境变量 > 默认值。API 环境变量为 `KIN_RATE_ENABLED`、`KIN_RATE_CAP`、`KIN_RATE_REFILL`（次/秒）；面板为 `KIN_PANEL_RATE_ENABLED`、`KIN_PANEL_RATE_CAP`、`KIN_PANEL_RATE_REFILL`。只有 `ENABLED=1/true` 才从环境开启限流，旧 CAP/REFILL 参数单独存在不会开启。未设置时两入口均关闭，待开启参数均为 60 次/分钟、突发 60 次。
+- `/api/panel/*` 与 `/admin/*` 使用面板入口，其余鉴权请求使用 API 入口；每把 Key、每个登录用户名分别计数，两入口互不占用额度。Space 的管理请求使用面板入口。超过限流返回 429 `gateway_rate_limit`，`error.details.scope` 标记入口。
+- 此设置不修改密钥/槽位自身的 RPM、并发、配额，不停止现有请求或槽位内核。额度只在当前控制面进程内计数，多控制面副本不共享。
+
 ## 引导
 
 所有已登录角色与 master API key 可调，不是公开接口。状态按用户名存在 SQLite `settings` 键 `onboarding_state`；master key（`apiKeyKind=master`）键为 `__master__`。
