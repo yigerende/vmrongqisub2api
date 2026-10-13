@@ -69,7 +69,7 @@ func lastActivity(path string, fallback time.Time) time.Time {
 
 // Run mirrors cc-bridge telemetry_loop:
 // /v1 (or worker start) activates a 10-minute session.
-// Every 10s: event_logging/batch tengu_api_success.
+// Every 10s: event_logging/v2/batch tengu_api_success.
 // Every 6h (first immediate): GrowthBook /api/eval.
 // worker.json telemetry is re-read when the file mtime moves, so identity,
 // betas, headers, env, and enabled flip without bouncing the process.

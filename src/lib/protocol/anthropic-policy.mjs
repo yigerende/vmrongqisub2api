@@ -1,6 +1,7 @@
 import crypto from 'node:crypto'
 import {
   anthropicContentIsEmpty,
+  dropEmptySystemControlTurns,
   liftMidConversationSystemMessages,
   mergeConsecutiveAnthropicMessages,
   messageHasTurnControls,
@@ -157,11 +158,11 @@ export function stripInvalidThinkingBlocks(body = {}) {
     }
     return filteredThis ? { ...message, content } : message
   })
-  if (!changed) return body
+  if (!changed) return dropEmptySystemControlTurns(body)
   const withoutEmpty = messages.filter(
     (message) => !anthropicContentIsEmpty(message?.content) || messageHasTurnControls(message),
   )
-  return { ...body, messages: mergeConsecutiveAnthropicMessages(withoutEmpty) }
+  return dropEmptySystemControlTurns({ ...body, messages: mergeConsecutiveAnthropicMessages(withoutEmpty) })
 }
 
 export const CONTEXT_MANAGEMENT_BETA = 'context-management-2025-06-27'
@@ -287,6 +288,7 @@ export function sanitizeAnthropicBodyForBetaTokens(body = {}, anthropicBetaHeade
   ) {
     out = liftMidConversationSystemMessages(out)
   }
+  out = dropEmptySystemControlTurns(out)
   return downgradeUngatedThinkingDisplay(out, anthropicBetaHeader)
 }
 

@@ -10,7 +10,7 @@ import {
   extractOAuthCodeFromRedirect,
 } from '../../src/lib/oauth/cookie-auth.mjs'
 import fs from 'node:fs'
-import { FULL_OAUTH_SCOPE, REDIRECT_URI, TOKEN_URL } from '../../src/lib/oauth/oauth-contract.mjs'
+import { BOOTSTRAP_URL, FULL_OAUTH_SCOPE, REDIRECT_URI, TOKEN_URL } from '../../src/lib/oauth/oauth-contract.mjs'
 
 // auth.js is the local source of the kin-oauth-auth binary and is not in the repo.
 const localAuthSkip = fs.existsSync(new URL('../../src/lib/oauth/auth.js', import.meta.url))
@@ -65,10 +65,10 @@ test('sessionKeyToOAuth on local egress hops without PROXY_URL', { skip: localAu
     fetchImpl: makeStrictOAuthFetch(seen),
   })
   assert.equal(cred.access_token, 'sk-ant-oat01-token')
-  assert.equal(seen.length, 5)
+  assert.equal(seen.length, 4)
 })
 
-test('sessionKeyToOAuth performs strict org authorize token bootstrap grove flow', {
+test('sessionKeyToOAuth performs strict org authorize token bootstrap flow', {
   skip: localAuthSkip,
 }, async () => {
   const seen = []
@@ -86,7 +86,7 @@ test('sessionKeyToOAuth performs strict org authorize token bootstrap grove flow
   assert.equal(cred.refresh_token, 'sk-ant-ort01-token')
   assert.deepEqual(
     seen.map((r) => r.stage),
-    ['orgs', 'authorize', 'token', 'bootstrap', 'grove'],
+    ['orgs', 'authorize', 'token', 'bootstrap'],
   )
 })
 
@@ -104,7 +104,7 @@ test('sessionKeyToOAuth maps stale authorize response', { skip: localAuthSkip },
   )
 })
 
-test('exchangeTokenViaCookieAuth posts token then requires bootstrap and Grove', { skip: localAuthSkip }, async () => {
+test('exchangeTokenViaCookieAuth posts token then requires bootstrap', { skip: localAuthSkip }, async () => {
   const seen = []
   const tok = await exchangeTokenViaCookieAuth({
     code: 'abc#state-1',
@@ -115,7 +115,7 @@ test('exchangeTokenViaCookieAuth posts token then requires bootstrap and Grove',
   assert.equal(tok.access_token, 'sk-ant-oat01-token')
   assert.deepEqual(
     seen.map((r) => r.stage),
-    ['token', 'bootstrap', 'grove'],
+    ['token', 'bootstrap'],
   )
 })
 
@@ -128,22 +128,6 @@ test('exchangeTokenViaCookieAuth reads streamed token responses', { skip: localA
     fetchImpl: makeStrictOAuthFetch(seen, { tokenOnly: true, tokenStream: true }),
   })
   assert.equal(tok.access_token, 'sk-ant-oat01-token')
-})
-
-test('exchangeTokenViaCookieAuth falls back when platform Grove path is unavailable', {
-  skip: localAuthSkip,
-}, async () => {
-  const seen = []
-  await exchangeTokenViaCookieAuth({
-    code: 'abc#state-1',
-    codeVerifier: 'ver',
-    proxyUrl: 'socks5h://127.0.0.1:1',
-    fetchImpl: makeStrictOAuthFetch(seen, { tokenOnly: true, groveStatus: 404 }),
-  })
-  assert.deepEqual(
-    seen.map((r) => r.stage),
-    ['token', 'bootstrap', 'grove', 'grove_fallback'],
-  )
 })
 
 test('exchangeTokenViaCookieAuth redacts failed token bodies', { skip: localAuthSkip }, async () => {
@@ -283,13 +267,14 @@ function makeStrictOAuthFetch(seen, opts = {}) {
         opts.tokenStream === true,
       )
     }
-    if (url === 'https://api.anthropic.com/api/claude_cli/bootstrap?entrypoint=claude-vscode&model=claude-opus-5') {
+    if (url === BOOTSTRAP_URL) {
       seen.push({ stage: 'bootstrap' })
       assert.equal(init.method, 'GET')
       assert.equal(headers['user-agent'], 'claude-cli/2.1.293 (external, sdk-cli)')
       assert.equal(headers['x-app'], 'cli')
       assert.equal(headers['anthropic-beta'], 'oauth-2025-04-20')
       assert.equal(headers.authorization, 'Bearer sk-ant-oat01-token')
+      assert.doesNotMatch(url, /vscode/)
       return response(200, {
         oauth_account: {
           account_uuid: 'acct-sk',
@@ -297,20 +282,6 @@ function makeStrictOAuthFetch(seen, opts = {}) {
           organization_uuid: 'org-sk',
         },
       })
-    }
-    if (url === 'https://platform.claude.com/api/oauth/account/settings') {
-      seen.push({ stage: 'grove' })
-      assert.equal(init.method, 'PATCH')
-      assert.equal(headers['user-agent'], 'claude-cli/2.1.293 (external, sdk-cli)')
-      assert.deepEqual(JSON.parse(init.body), { grove_enabled: true })
-      if (opts.groveStatus) return response(opts.groveStatus, { error: 'unsupported path' })
-      return response(200, { ok: true })
-    }
-    if (url === 'https://api.anthropic.com/api/oauth/account/settings') {
-      seen.push({ stage: 'grove_fallback' })
-      assert.equal(init.method, 'PATCH')
-      assert.deepEqual(JSON.parse(init.body), { grove_enabled: true })
-      return response(200, { ok: true })
     }
     throw new Error(`unexpected fetch ${url}`)
   }

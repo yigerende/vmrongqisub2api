@@ -9,7 +9,7 @@ import (
 
 func TestInitEventUsesOfficial1PEnvelope(t *testing.T) {
 	ev := InitEvent(Identity{
-		DeviceID:           "dev-hash",
+		DeviceID:           strings.Repeat("ab", 32),
 		AccountUUID:        "acc",
 		OrgUUID:            "org",
 		Email:              "slot@example.com",
@@ -43,7 +43,7 @@ func TestInitEventUsesOfficial1PEnvelope(t *testing.T) {
 	for _, must := range []string{
 		`"event_type":"ClaudeCodeInternalEvent"`,
 		`"event_name":"tengu_init"`,
-		`"device_id":"dev-hash"`,
+		`"device_id":"` + strings.Repeat("ab", 32) + `"`,
 		`"account_uuid":"acc"`,
 		`"organization_uuid":"org"`,
 		`"email":"slot@example.com"`,
@@ -52,7 +52,7 @@ func TestInitEventUsesOfficial1PEnvelope(t *testing.T) {
 		`"platform":"linux"`,
 		`"platform_raw":"linux"`,
 		`"arch":"x64"`,
-		`"node_version":"v24.3.0"`,
+		`"shell":"bash"`,
 		`"linux_distro_id":"ubuntu"`,
 		`"linux_distro_version":"24.04"`,
 		`"linux_kernel":"6.8.0-generic"`,
@@ -62,6 +62,11 @@ func TestInitEventUsesOfficial1PEnvelope(t *testing.T) {
 	} {
 		if !strings.Contains(string(raw), must) {
 			t.Fatalf("missing %s in %s", must, raw)
+		}
+	}
+	for _, drop := range []string{`"node_version"`, `"is_running_with_bun"`, `"betas"`, `"additional_metadata"`, `"model"`} {
+		if strings.Contains(string(raw), drop) {
+			t.Fatalf("did not expect %s in %s", drop, raw)
 		}
 	}
 	if strings.Contains(string(raw), `"properties"`) {
@@ -94,6 +99,9 @@ func TestSuccessEventMatchesBridgeEnvelope(t *testing.T) {
 	if !strings.Contains(string(raw), `"linux_kernel"`) {
 		t.Fatalf("full env missing linux_kernel: %s", raw)
 	}
+	if strings.Contains(string(raw), `"model"`) || strings.Contains(string(raw), "claude-sonnet-5") {
+		t.Fatalf("model must not be uploaded: %s", raw)
+	}
 }
 
 func TestGrowthbookPrefersOfficialUserID(t *testing.T) {
@@ -107,6 +115,12 @@ func TestGrowthbookPrefersOfficialUserID(t *testing.T) {
 	attrs := body["attributes"].(map[string]any)
 	if attrs["id"] != "userid" || attrs["deviceID"] != "userid" {
 		t.Fatalf("attrs=%v", attrs)
+	}
+	if attrs["userType"] != "external" || attrs["entrypoint"] != "cli" {
+		t.Fatalf("attrs=%v", attrs)
+	}
+	if _, ok := body["forcedFeatures"].([]any); !ok {
+		t.Fatalf("forcedFeatures=%T", body["forcedFeatures"])
 	}
 	if attrs["subscriptionType"] != "apple_subscription" {
 		t.Fatalf("subscription=%v", attrs["subscriptionType"])
@@ -127,33 +141,35 @@ func TestInitEventOmitsEmptyOptionalFields(t *testing.T) {
 	}
 }
 
-func TestEventUsesConfiguredEnvAnd278Betas(t *testing.T) {
+func TestEventUsesConfiguredEnvAndOmitsBetas(t *testing.T) {
 	ev := InitEvent(Identity{
 		DeviceID: "d",
 		Betas:    "thinking-binding-controls-2026-08-01",
-		Env:      map[string]any{"platform": "linux", "version": "2.1.278", "linux_kernel": "from-env"},
+		Env:      map[string]any{"platform": "linux", "version": "2.1.278", "linux_kernel": "from-env", "node_version": "v1", "is_running_with_bun": true},
 	}, time.Date(2026, 8, 23, 1, 0, 0, 0, time.UTC))
 	raw, err := json.Marshal(ev)
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := string(raw)
-	for _, must := range []string{`"linux_kernel":"from-env"`, `"version":"2.1.278"`, "thinking-binding-controls-2026-08-01"} {
+	for _, must := range []string{`"linux_kernel":"from-env"`, `"version":"2.1.278"`, `"shell":"bash"`, `"vcs":"git"`, `"runtimes":"node"`} {
 		if !strings.Contains(body, must) {
 			t.Fatalf("missing %s in %s", must, body)
 		}
 	}
-	if strings.Contains(body, "2.1.241") || strings.Contains(body, "advanced-tool-use-2025-11-20") {
-		t.Fatalf("stale protocol marker in %s", body)
+	for _, drop := range []string{"thinking-binding-controls-2026-08-01", `"node_version"`, `"is_running_with_bun"`, "2.1.241"} {
+		if strings.Contains(body, drop) {
+			t.Fatalf("unexpected %s in %s", drop, body)
+		}
 	}
 	fallback := InitEvent(Identity{}, time.Date(2026, 8, 23, 1, 0, 0, 0, time.UTC))
 	raw, _ = json.Marshal(fallback)
 	body = string(raw)
-	if !strings.Contains(body, "thinking-binding-controls-2026-08-01") || !strings.Contains(body, `"version":"2.1.293"`) {
-		t.Fatalf("fallback=%s", body)
+	if strings.Contains(body, "thinking-binding-controls") || strings.Contains(body, "advanced-tool-use") {
+		t.Fatalf("fallback uploaded betas: %s", body)
 	}
-	if !strings.Contains(body, "advanced-tool-use-2025-11-20") || !strings.Contains(body, "mid-conversation-system-clear-at-2026-08-21") {
-		t.Fatalf("fallback betas=%s", body)
+	if !strings.Contains(body, `"version":"2.1.293"`) || !strings.Contains(body, `"shell":"bash"`) {
+		t.Fatalf("fallback=%s", body)
 	}
 	attrs := GrowthbookEval(Identity{UserID: "u"})["attributes"].(map[string]any)
 	if attrs["appVersion"] != "2.1.293" {

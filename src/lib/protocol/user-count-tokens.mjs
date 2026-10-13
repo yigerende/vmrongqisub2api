@@ -258,7 +258,7 @@ export async function handleUserCountTokens(req, res, deps) {
   if (
     claudeCodeOnlyFromRouting(routing) &&
     detectInboundPlatform(parsed.body.model).platform === 'anthropic' &&
-    !isClaudeCodeFamilyRequest(req?.headers || {}, inbound, { routing, countTokens: true })
+    !isClaudeCodeFamilyRequest(req?.headers || {}, inbound, { countTokens: true })
   ) {
     const err = claudeCodeOnlyError()
     return json(res, err.status, err.body)

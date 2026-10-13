@@ -46,6 +46,107 @@ export function listVmRecordFiles(dir) {
   }
 }
 
+/* --------------------------------------------------------------------------
+ * Slot-record read cache.
+ *
+ * A scheduling attempt reads every slot record, and the pool re-runs the
+ * attempt on every request, retry and failover. Caching UTF-8 text (never a
+ * parsed object) keyed by path + (mtimeMs, size, ino) avoids repeating those
+ * decodes while the on-disk identity is unchanged. A matching signature is a
+ * freshness hint, not a byte-identity proof: writers that change bytes
+ * without a new mtime/size/inode can miss. Callers always receive a newly
+ * parsed object, so mutating a returned record cannot poison the next read.
+ *
+ * `KIN_VM_READ_CACHE_MS=0` disables the cache (escape hatch). The name is
+ * historical; the value is only an on/off switch, not a TTL. Capacity is a
+ * fixed LRU so deleted paths cannot accumulate without bound.
+ * ------------------------------------------------------------------------ */
+const readCache = new Map()
+
+/** Conservative bound: a large fleet of records + credential files, LRU. */
+export const VM_READ_CACHE_MAX_ENTRIES = 1024
+
+const readCacheEnabled = (() => {
+  const raw = process.env.KIN_VM_READ_CACHE_MS
+  if (raw == null || raw === '') return true
+  const value = Number(raw)
+  return Number.isFinite(value) ? value > 0 : true
+})()
+
+function isNotFound(err) {
+  return err && err.code === 'ENOENT'
+}
+
+function putReadCache(file, entry) {
+  if (readCache.has(file)) readCache.delete(file)
+  readCache.set(file, entry)
+  if (readCache.size <= VM_READ_CACHE_MAX_ENTRIES) return
+  const oldest = readCache.keys().next().value
+  if (oldest !== undefined && oldest !== file) readCache.delete(oldest)
+}
+
+/** File text for `file`. Missing file → null; other I/O throws. */
+export function readFileCached(file) {
+  if (!readCacheEnabled) {
+    try {
+      return fs.readFileSync(file, 'utf8')
+    } catch (err) {
+      if (isNotFound(err)) return null
+      throw err
+    }
+  }
+  let stat
+  try {
+    stat = fs.statSync(file)
+  } catch (err) {
+    readCache.delete(file)
+    if (isNotFound(err)) return null
+    throw err
+  }
+  const hit = readCache.get(file)
+  if (hit && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size && hit.ino === stat.ino) {
+    putReadCache(file, hit)
+    return hit.text
+  }
+  let text
+  try {
+    text = fs.readFileSync(file, 'utf8')
+  } catch (err) {
+    readCache.delete(file)
+    if (isNotFound(err)) return null
+    throw err
+  }
+  putReadCache(file, { mtimeMs: stat.mtimeMs, size: stat.size, ino: stat.ino, text })
+  return text
+}
+
+/** Parsed JSON for `file`. Missing file → null; corrupt JSON and other I/O throw. */
+export function readJsonCached(file) {
+  const text = readFileCached(file)
+  if (text == null) return null
+  return JSON.parse(text)
+}
+
+/** Drop one path (or the whole cache). Returns whether a path entry was present. */
+export function invalidateReadCache(file = null) {
+  if (!file) {
+    readCache.clear()
+    return
+  }
+  return readCache.delete(file)
+}
+
+/** Drop the slot record and any cached files under `vms/<id>/` (credentials). */
+export function invalidateVmSlotReadCache(projectRoot, id) {
+  if (!projectRoot || !id) return
+  invalidateReadCache(path.join(projectRoot, 'vms', `${id}.json`))
+  const home = path.join(projectRoot, 'vms', id)
+  const prefix = home + path.sep
+  for (const file of readCache.keys()) {
+    if (file === home || file.startsWith(prefix)) readCache.delete(file)
+  }
+}
+
 const locks = new Map()
 
 /**
@@ -99,6 +200,7 @@ export function atomicWriteJson(filePath, obj, { mode } = {}) {
       fs.chmodSync(filePath, mode)
     } catch {}
   }
+  invalidateReadCache(filePath)
   notifyVmWrite(filePath)
   return true
 }
@@ -106,7 +208,7 @@ export function atomicWriteJson(filePath, obj, { mode } = {}) {
 export function writeJsonIfChanged(filePath, obj, { mode } = {}) {
   const data = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2)
   try {
-    if (fs.existsSync(filePath) && fs.readFileSync(filePath, 'utf8') === data) {
+    if (fs.existsSync(filePath) && readFileCached(filePath) === data) {
       return false
     }
   } catch {}

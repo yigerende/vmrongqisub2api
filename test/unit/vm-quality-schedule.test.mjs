@@ -15,6 +15,7 @@ import {
   syncCodexQuotaSchedule,
 } from '../../src/lib/vm/vm-registry.mjs'
 import { pickCodexCandidates } from '../../src/lib/protocol/handle-codex.mjs'
+import { createPanelHandler } from '../../src/lib/admin/panel-routes.mjs'
 
 function fixture(t, { platform = 'openai', runProbe } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-quality-schedule-'))
@@ -277,4 +278,37 @@ test('Claude slots use the same thresholds and maintain running status', async (
   assert.equal(f.vm().schedule_quality_identity, qualityIdentity(listVms(f.root)[0]))
   await f.run('normal')
   assert.equal(f.vm().schedulable, true)
+})
+
+test('upstream proxy re-enable recognizes GPT credentials without clearing quality or manual suspension', async (t) => {
+  const f = fixture(t)
+  patchVmRecord(f.root, f.id, { schedule_manual: false, claude: { refresh_error: 'credential_required' } })
+  f.config({ failure_limit: 1 })
+  await f.run()
+  let response
+  const handler = createPanelHandler({
+    cfg: { paths: { project: f.root } },
+    requireAuth(req) {
+      req.apiKeyKind = 'master'
+      return true
+    },
+    proxyPool: { setEnabled: () => ({ ok: true, proxy: { bound_vm_ids: [f.id] } }) },
+    json: (_, status, body) => {
+      response = { status, body }
+      return true
+    },
+  })
+  const enableProxy = () =>
+    handler({ method: 'POST' }, {}, new URL('http://localhost/api/panel/proxies/px-local/enable'))
+  await enableProxy()
+  assert.equal(response.status, 200)
+  assert.equal(f.vm().schedulable, false)
+  assert.equal(f.snapshot().paused_by_quality, true)
+  await f.run('normal')
+  assert.equal(f.vm().schedulable, true)
+  setVmSchedulable(f.root, f.id, false, 'manual', { preserveStatus: true, source: 'manual' })
+  await enableProxy()
+  assert.equal(response.status, 200)
+  assert.equal(f.vm().schedulable, false)
+  assert.equal(f.vm().schedule_disabled_reason, 'manual')
 })

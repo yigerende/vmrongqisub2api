@@ -1,21 +1,28 @@
 import { useState } from 'react'
-import { useNavigate, useSearch } from '@tanstack/react-router'
+import { useQueryClient } from '@tanstack/react-query'
+import { Link, useNavigate, useSearch } from '@tanstack/react-router'
+import { DOCS_URL } from '@/config/repo'
+import { Eye, EyeOff, LogIn } from 'lucide-react'
 import { toast } from 'sonner'
 import { Logo } from '@/assets/logo'
 import { useAuthStore } from '@/stores/auth-store'
 import { loginRequest } from '@/lib/api'
 import { apiBase, sameOriginPanel, setApiBase } from '@/lib/session'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { ThemeSwitch } from '@/components/theme-switch'
+import { onboardingQueryOptions } from '@/features/welcome/queries'
 
+/** Standalone sign-in page; layout follows the newapi /sign-in screen. */
 export function LoginPage() {
-  const navigate = useNavigate()
   const search = useSearch({ from: '/login' })
+  const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const signIn = useAuthStore((s) => s.signIn)
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
   const [base, setBase] = useState(apiBase())
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
@@ -34,10 +41,29 @@ export function LoginPage() {
         base: hideBase ? '' : base.trim().replace(/\/$/, '') || apiBase(),
       })
       signIn(result.token, result.user)
+      let needsWelcome = false
+      try {
+        const onboarding = await queryClient.fetchQuery(
+          onboardingQueryOptions(true)
+        )
+        needsWelcome = Boolean(onboarding.needs_welcome)
+      } catch {
+        needsWelcome = false
+      }
       toast.success('登录成功')
+      if (needsWelcome) {
+        await navigate({ to: '/welcome', search: { setup: true } })
+        return
+      }
+      // `redirect` is a router href (`/vm/x?tab=y`); never bounce back into the public pages.
       const next = search.redirect
-      if (next && next.startsWith('#/')) {
-        window.location.hash = next.replace(/^#/, '')
+      if (
+        next &&
+        next.startsWith('/') &&
+        !next.startsWith('//') &&
+        !/^\/(welcome|login)\b/.test(next)
+      ) {
+        await navigate({ href: next })
         return
       }
       await navigate({ to: '/overview' })
@@ -49,60 +75,121 @@ export function LoginPage() {
   }
 
   return (
-    <div className='flex min-h-svh items-center justify-center bg-background p-6'>
-      <Card className='w-full max-w-sm border-border/80 shadow-2xl shadow-cyan-950/20'>
-        <CardHeader className='space-y-3 text-center'>
-          <div className='mx-auto flex size-14 items-center justify-center rounded-2xl border border-primary/30 bg-primary/10 shadow-lg shadow-cyan-500/15'>
-            <Logo className='size-8' />
-          </div>
-          <div>
-            <CardTitle className='text-2xl font-bold tracking-tight'>
-              vm2api
-            </CardTitle>
-            <p className='text-sm text-muted-foreground'>
-              虚拟化号池网关控制台
-            </p>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <form className='space-y-4' onSubmit={onSubmit}>
+    <div className='welcome-theme relative flex min-h-svh flex-col overflow-hidden bg-background text-foreground'>
+      <div
+        aria-hidden
+        className='pointer-events-none absolute inset-0 opacity-20 dark:opacity-[0.08]'
+        style={{
+          background: [
+            'radial-gradient(ellipse 50% 45% at 30% 30%, oklch(0.72 0.18 250 / 70%) 0%, transparent 70%)',
+            'radial-gradient(ellipse 40% 40% at 75% 70%, oklch(0.70 0.12 280 / 50%) 0%, transparent 70%)',
+          ].join(', '),
+        }}
+      />
+
+      <header className='relative flex h-16 items-center justify-between px-6'>
+        <Link
+          to='/welcome'
+          className='group flex items-center gap-2.5 rounded-lg focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
+        >
+          <span className='grid size-7 place-items-center rounded-lg bg-foreground text-background transition-transform duration-300 group-hover:scale-105'>
+            <Logo aria-hidden className='size-4' />
+          </span>
+          <span className='text-sm font-semibold tracking-tight'>vm2api</span>
+        </Link>
+        <ThemeSwitch />
+      </header>
+
+      <main className='relative flex flex-1 items-center justify-center px-6 pb-20'>
+        <div className='welcome-fade-up w-full max-w-[22rem]'>
+          <h1 className='text-xl font-semibold tracking-tight'>登录控制台</h1>
+          <p className='mt-2 text-sm text-muted-foreground'>
+            第一次使用？看
+            <a
+              href={`${DOCS_URL}guide/install`}
+              target='_blank'
+              rel='noreferrer'
+              className='text-foreground underline underline-offset-4'
+            >
+              安装文档
+            </a>
+            ，或回到
+            <Link
+              to='/welcome'
+              className='text-foreground underline underline-offset-4'
+            >
+              欢迎页
+            </Link>
+            。
+          </p>
+
+          <form className='mt-8 space-y-4' onSubmit={onSubmit}>
             <div className='space-y-2'>
-              <Label htmlFor='username'>用户名</Label>
+              <Label htmlFor='login-username'>用户名</Label>
               <Input
-                id='username'
+                id='login-username'
+                className='h-10 rounded-lg'
                 autoComplete='username'
+                placeholder='输入面板用户名'
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
               />
             </div>
             <div className='space-y-2'>
-              <Label htmlFor='password'>密码</Label>
-              <Input
-                id='password'
-                type='password'
-                autoComplete='current-password'
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-              />
+              <Label htmlFor='login-password'>密码</Label>
+              <div className='relative'>
+                <Input
+                  id='login-password'
+                  type={showPassword ? 'text' : 'password'}
+                  className='h-10 rounded-lg pe-10'
+                  autoComplete='current-password'
+                  placeholder='输入密码'
+                  autoFocus
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+                <button
+                  type='button'
+                  aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                  onClick={() => setShowPassword((v) => !v)}
+                  className='absolute inset-y-0 end-0 flex w-10 items-center justify-center rounded-e-lg text-muted-foreground hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none'
+                >
+                  {showPassword ? (
+                    <EyeOff aria-hidden className='size-4' />
+                  ) : (
+                    <Eye aria-hidden className='size-4' />
+                  )}
+                </button>
+              </div>
             </div>
             {hideBase ? null : (
               <div className='space-y-2'>
-                <Label htmlFor='api-base'>API Base</Label>
+                <Label htmlFor='login-api-base'>API Base</Label>
                 <Input
-                  id='api-base'
+                  id='login-api-base'
                   placeholder='http://127.0.0.1:8787'
+                  className='h-10 rounded-lg'
                   value={base}
                   onChange={(e) => setBase(e.target.value)}
                 />
               </div>
             )}
-            {error ? <p className='text-sm text-destructive'>{error}</p> : null}
-            <Button className='w-full' type='submit' disabled={pending}>
+            {error ? (
+              <p className='text-sm text-destructive' role='alert'>
+                {error}
+              </p>
+            ) : null}
+            <Button
+              className='mt-2 h-10 w-full rounded-lg font-medium'
+              type='submit'
+              disabled={pending}
+            >
+              <LogIn aria-hidden className='size-4' />
               {pending ? '登录中…' : '登录'}
             </Button>
           </form>
-        </CardContent>
-      </Card>
+        </div>
+      </main>
     </div>
   )
 }

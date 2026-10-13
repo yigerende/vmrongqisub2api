@@ -437,6 +437,7 @@ export async function handleCodexProtocol({
   sessions = null,
   body = null,
   captureOutbound = false,
+  requestStartedAt = Date.now(),
 }) {
   const codex = normalizeCodexRouting(routing.codex)
   const allowed = isCodexProtocolAllowed(protocol, { codex })
@@ -680,6 +681,10 @@ export async function handleCodexProtocol({
             if (named) res.write(named)
           },
         })
+        // The log and total duration share ingress time; pool scoring keeps hop TTFT.
+        logBag.first_token_ms = Number.isFinite(result?.firstTokenAt)
+          ? Math.max(0, result.firstTokenAt - requestStartedAt)
+          : (result?.ttftMs ?? null)
         if (conversionError) {
           result.ok = false
           result.status = 502
@@ -713,7 +718,6 @@ export async function handleCodexProtocol({
             usage?.input_tokens_details?.cache_write_tokens ??
             usage?.cache_creation_tokens ??
             null
-          logBag.first_token_ms = result.ttftMs ?? null
           reportOpenAIAttempt(vm.id, 'succeeded', result.ttftMs ?? null)
           logBag.final_state = result?.ok ? result.terminalState || 'verified' : 'verified'
           logBag.upstream_model = converted.body.model

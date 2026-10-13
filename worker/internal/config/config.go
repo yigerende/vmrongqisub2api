@@ -55,7 +55,7 @@ type TelemetryConfig struct {
 	Enabled  bool              `json:"enabled"`
 	Identity TelemetryIdentity `json:"identity"`
 	Headers  map[string]string `json:"headers"`
-	// Betas is the Claude Code main-session header. Empty means the Go default.
+	// Betas is kept so older worker.json still decodes. Events do not send it.
 	Betas string `json:"betas"`
 }
 
@@ -76,7 +76,11 @@ type TelemetryIdentity struct {
 	CLIVersion         string           `json:"cli_version"`
 	Entrypoint         string           `json:"entrypoint"`
 	Terminal           string           `json:"terminal"`
+	Shell              string           `json:"shell"`
 	PackageManagers    string           `json:"package_managers"`
+	VCS                string           `json:"vcs"`
+	Runtimes           string           `json:"runtimes"`
+	BuildTime          string           `json:"build_time"`
 	LinuxDistroID      string           `json:"linux_distro_id"`
 	LinuxDistroVersion string           `json:"linux_distro_version"`
 	LinuxKernel        string           `json:"linux_kernel"`

@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { AccountQuota } from '../../src/lib/pool/account-quota.mjs'
+import { officialMessagesBody } from '../../src/lib/protocol/anthropic-messages.mjs'
 import { PoolScheduler } from '../../src/lib/pool/pool-scheduler.mjs'
 import { FailoverRunner } from '../../src/lib/pool/failover-runner.mjs'
 import {
@@ -311,6 +312,104 @@ test('token estimate counts a long prompt as large cold on first turn', () => {
   assert.equal(risk.cold, true)
   assert.ok(risk.uncachedTokens >= DEFAULT_LARGE_COLD_UNCACHED_TOKENS)
   assert.equal(risk.largeCold, true)
+})
+
+test('output ceiling does not make a short prompt large in the critical band', () => {
+  clearCachePrefixSessions()
+  const account = 'band'
+  const session = 'sess-demo'
+  const system = [{ type: 'text', text: 'You are Claude Code.' }]
+  const history = [
+    { role: 'user', content: 'read src/app.ts and fix the failing test' },
+    { role: 'assistant', content: 'Done. The test now passes.' },
+  ]
+  const turn = (n) => ({
+    model: 'claude-opus-5-5',
+    max_tokens: 128000,
+    system,
+    messages: [...history.slice(0, n), { role: 'user', content: `follow-up ${n}` }],
+  })
+  const key = `${account}:${session}`
+  trackCachePrefix(key, turn(0))
+  assert.equal(confirmCachePrefix(key), true)
+  trackCachePrefix(key, turn(2))
+  assert.equal(confirmCachePrefix(key), true)
+
+  const warm = estimateRequestRisk(turn(2), { accountId: account, sessionId: session })
+  assert.equal(warm.cold, false)
+  assert.equal(warm.coldReason, 'warm')
+  assert.equal(warm.maxTokens, 128000)
+  assert.ok(warm.uncachedTokens < 1000, `warm uncached ${warm.uncachedTokens}`)
+  assert.equal(warm.largeCold, false)
+
+  const fresh = estimateRequestRisk(turn(0), { accountId: account, sessionId: 'sess-new' })
+  assert.equal(fresh.cold, true)
+  assert.equal(fresh.coldReason, 'first_turn')
+  assert.equal(fresh.maxTokens, 128000)
+  assert.ok(fresh.uncachedTokens < 1000, `fresh uncached ${fresh.uncachedTokens}`)
+  assert.equal(fresh.largeCold, false)
+
+  const filled = officialMessagesBody({
+    model: 'claude-opus-5-5',
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+  assert.equal(filled.max_tokens, 128000)
+  const omitted = estimateRequestRisk(filled, { accountId: account, sessionId: 'sess-omit' })
+  assert.equal(omitted.largeCold, false)
+  assert.ok(omitted.uncachedTokens < DEFAULT_LARGE_COLD_UNCACHED_TOKENS)
+
+  const q = quota()
+  setUtil(q, account, { u5: 0.79 })
+  const warmReq = { body: turn(2), sessionId: session }
+  assert.equal(q.canAccept(account, { quotaRequest: warmReq }).ok, true)
+  assert.equal(q.tryAcquire(account, { quotaRequest: warmReq }).ok, true)
+  q.noteBandSettled(account)
+  q.release(account)
+  assert.equal(q.staleSettled.get(account), 1)
+  assert.equal(q.canAccept(account, { quotaRequest: warmReq }).ok, true)
+  assert.equal(q.canAccept(account, { quotaRequest: { body: turn(0), sessionId: 'sess-new' } }).ok, true)
+
+  const huge = {
+    model: 'claude-opus-5-5',
+    max_tokens: 128000,
+    messages: [{ role: 'user', content: 'word '.repeat(80000) }],
+  }
+  assert.equal(estimateRequestRisk(huge, { accountId: account, sessionId: 'sess-huge' }).largeCold, true)
+  assert.equal(
+    q.canAccept(account, { quotaRequest: { body: huge, sessionId: 'sess-huge' } }).reason,
+    'quota_guard_request_too_large',
+  )
+})
+
+test('stale band still blocks a warm turn whose new user text is itself large', () => {
+  clearCachePrefixSessions()
+  const base = {
+    model: 'claude-opus-5-5',
+    max_tokens: 128000,
+    messages: [{ role: 'user', content: 'short' }],
+  }
+  trackCachePrefix('band:sess', base)
+  assert.equal(confirmCachePrefix('band:sess'), true)
+  const extended = {
+    ...base,
+    messages: [
+      { role: 'user', content: 'short' },
+      { role: 'assistant', content: 'ok' },
+      { role: 'user', content: 'word '.repeat(80000) },
+    ],
+  }
+  const risk = estimateRequestRisk(extended, { accountId: 'band', sessionId: 'sess' })
+  assert.equal(risk.cold, false)
+  assert.equal(risk.largeCold, false)
+  assert.ok(risk.uncachedTokens >= DEFAULT_LARGE_COLD_UNCACHED_TOKENS)
+  const q = quota()
+  setUtil(q, 'band', { u5: 0.79 })
+  const quotaRequest = { body: extended, sessionId: 'sess' }
+  assert.equal(q.canAccept('band', { quotaRequest }).ok, true)
+  assert.equal(q.tryAcquire('band', { quotaRequest }).ok, true)
+  q.noteBandSettled('band')
+  q.release('band')
+  assert.equal(q.canAccept('band', { quotaRequest }).reason, 'quota_guard_request_too_large')
 })
 
 test('quota_guard_request_too_large stays a 429 and is not rewritten to pool_unavailable', () => {

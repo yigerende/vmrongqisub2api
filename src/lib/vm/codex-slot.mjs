@@ -3,7 +3,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { atomicWriteJson } from './vm-file.mjs'
+import { atomicWriteJson, readJsonCached } from './vm-file.mjs'
 import { isCodexVm } from '../protocol/codex-route.mjs'
 import { buildCodexUsageView, extraToCodexSnapshot } from '../protocol/codex-usage.mjs'
 
@@ -16,7 +16,7 @@ export function codexCredentialPath(projectRoot, vmId) {
 export function readCodexAccounts(projectRoot, vmId) {
   const file = codexCredentialPath(projectRoot, vmId)
   try {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const raw = readJsonCached(file)
     return Array.isArray(raw?.accounts) ? raw.accounts : []
   } catch {
     return []
@@ -258,12 +258,13 @@ export function upsertCodexAccount(projectRoot, vmId, patch = {}) {
 export function persistCodexQuotaSnapshot(projectRoot, vmId, { extra, resetCredits, planType } = {}) {
   if (!projectRoot || !vmId) throw new Error('projectRoot and vmId required')
   const file = path.join(projectRoot, 'vms', `${vmId}.json`)
-  let vm = {}
+  let vm
   try {
-    vm = JSON.parse(fs.readFileSync(file, 'utf8'))
+    vm = readJsonCached(file)
   } catch {
     return null
   }
+  if (!vm || typeof vm !== 'object') return null
   vm.codex = vm.codex && typeof vm.codex === 'object' ? { ...vm.codex } : {}
   if (extra && typeof extra === 'object') {
     vm.codex.extra = { ...(vm.codex.extra || {}), ...extra }

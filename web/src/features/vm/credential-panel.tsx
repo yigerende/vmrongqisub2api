@@ -384,14 +384,14 @@ function ClaudeCredentialPanel({
           <Hint>
             {kind === 'setup-token'
               ? !sessionKey.trim()
-                ? 'sessionKey 经槽出口申请完整 OAuth 权限（含 profile、inference、sessions），采集身份并开启账号 Grove（Help improve Claude）。以 Setup Token 模式运行，不跑官方初装；直接粘贴 access token 不增加权限。'
+                ? 'sessionKey 经槽出口申请完整 OAuth 权限（含 profile、inference、sessions），换票后采集身份。以 Setup Token 模式运行，不跑官方初装；直接粘贴 access token 不增加权限。'
                 : SESSION_KEY_PREFIX.test(sessionKey.trim())
-                  ? '识别为 sessionKey，将申请完整 OAuth 权限、采集身份并开启账号 Grove，以 Setup Token 模式运行。'
+                  ? '识别为 sessionKey，将申请完整 OAuth 权限、换票后采集身份，以 Setup Token 模式运行。'
                   : '识别为 access token，将按 Setup Token 直接落盘，不增加权限。'
               : !sessionKey.trim()
-                ? 'sk-ant-sid 经槽出口申请完整 OAuth 权限、采集身份并开启账号 Grove（Help improve Claude）；其它值按 access token 直接落盘，不增加权限。'
+                ? 'sk-ant-sid 经槽出口申请完整 OAuth 权限、换票后采集身份；其它值按 access token 直接落盘，不增加权限。'
                 : SESSION_KEY_PREFIX.test(sessionKey.trim())
-                  ? '识别为 sessionKey，将申请完整 OAuth 权限、采集身份并开启账号 Grove（Help improve Claude）。'
+                  ? '识别为 sessionKey，将申请完整 OAuth 权限、换票后采集身份。'
                   : '识别为 access token，将直接落盘，不增加权限。'}
           </Hint>
           <Button
@@ -468,8 +468,8 @@ function ClaudeCredentialPanel({
           </div>
           <Hint>
             {kind === 'setup-token'
-              ? `申请完整 OAuth 权限，换票后采集身份并开启账号 Grove（Help improve Claude）。浏览器须走 ${proxyHint || '同一槽出口'}，授权码须含 # 后半段。以 Setup Token 模式运行，不跑官方初装。`
-              : `浏览器须走 ${proxyHint || '同一槽出口'}，授权码须含 # 后半段。换票后采集身份并开启账号 Grove（Help improve Claude）。`}
+              ? `申请完整 OAuth 权限，换票后采集身份。浏览器须走 ${proxyHint || '同一槽出口'}，授权码须含 # 后半段。以 Setup Token 模式运行，不跑官方初装。`
+              : `浏览器须走 ${proxyHint || '同一槽出口'}，授权码须含 # 后半段。换票后采集身份。`}
           </Hint>
         </div>
       ) : (

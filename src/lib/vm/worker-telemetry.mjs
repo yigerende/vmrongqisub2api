@@ -9,13 +9,15 @@ import path from 'node:path'
 import { loadVmIdentity, OFFICIAL_CLI_VERSION } from '../identity/vm-identity.mjs'
 import { acceptLanguageFromLocale } from '../identity/crs-headers.mjs'
 import { defaultSeedPolicy, isTelemetryEnabled } from '../protocol/seed-policy.mjs'
-import { DEFAULT_BETA_HEADER } from '../protocol/claude-code-betas.mjs'
+import { resolveWorkstationProfile } from '../identity/workstation-profile.mjs'
 import { snapshotOauth } from './execution-context.mjs'
 import {
   buildFullEnvJson,
   DEFAULT_PROCESS_RANGES,
   distroVersionFromPretty,
+  officialDeviceID,
   telemetryCodeUa,
+  telemetryShell,
 } from '../identity/telemetry-env.mjs'
 import { readOfficialCcIdentity } from '../identity/official-fingerprint.mjs'
 import { slotHost } from './slot-host.mjs'
@@ -38,6 +40,21 @@ export function touchTelemetrySession(projectRoot, vmId, vm = null) {
   }
   slotHost(vm).touch(vm, path.join(projectRoot, 'vms', vmId))
   return { wrote: true }
+}
+function officialInstallTime(homeDir) {
+  if (!homeDir) return ''
+  let doc
+  try {
+    doc = JSON.parse(fs.readFileSync(path.join(homeDir, '.claude', 'kin-official-bootstrap.json'), 'utf8'))
+  } catch {
+    return ''
+  }
+  if (doc?.status !== 'ok' && doc?.hello_ok !== true) return ''
+  const raw = String(doc.finished_at || '').trim()
+  if (!raw) return ''
+  const ms = Date.parse(raw)
+  if (Number.isNaN(ms)) return raw
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
 
 function telemetryHeaders(identity) {
@@ -81,14 +98,14 @@ export function buildWorkerTelemetry(vm, projectRoot) {
   })
   const fp = identity.fingerprint || {}
   const guest = vm?.fingerprint || {}
-  const machineId = official.machine_id || fp.official_machine_id || null
-  const userId = official.user_id || identity.userId || fp.official_user_id || null
-  if (!machineId && !userId) {
+  const userId = officialDeviceID(official.user_id, fp.official_user_id)
+  if (!userId) {
     return { enabled: false, reason: 'waiting_official_identity' }
   }
+  const profile = resolveWorkstationProfile(vm || {})
   const payload = {
-    device_id: machineId || '',
-    user_id: userId || '',
+    device_id: userId,
+    user_id: userId,
     account_uuid: official.account_uuid || identity.accountUuid || '',
     org_uuid: official.org_uuid || identity.orgUuid || '',
     email: identity.email || official.email || '',
@@ -97,24 +114,25 @@ export function buildWorkerTelemetry(vm, projectRoot) {
     platform: 'linux',
     platform_raw: 'linux',
     arch: fp.stainless_arch || 'x64',
-    node_version: fp.stainless_runtime_version || 'v26.3.0',
     locale: identity.locale,
     timezone: identity.timezone,
     cli_version: identity.cliVersion,
     entrypoint: 'cli',
     terminal: 'unknown',
+    shell: telemetryShell(guest.shell || profile.shell),
     package_managers: '',
+    vcs: String(guest.vcs || '').trim() || 'git',
+    runtimes: String(guest.runtimes || '').trim() || 'node',
+    build_time: officialInstallTime(homeDir),
     linux_distro_id: guest.os_id || '',
     linux_distro_version: distroVersionFromPretty(guest.os_pretty),
     linux_kernel: guest.kernel_release || '',
     process: { ...DEFAULT_PROCESS_RANGES },
     source: 'official-cc-init',
   }
-  payload.betas = DEFAULT_BETA_HEADER
   payload.env = buildFullEnvJson(payload)
   return {
     enabled: true,
-    betas: DEFAULT_BETA_HEADER,
     identity: payload,
     headers: telemetryHeaders(identity),
   }

@@ -192,9 +192,9 @@ export function OfficialCcSettingsPane({
 
             <p className='text-xs text-muted-foreground'>
               运输固定 cli-hop，跟 inference.engine=rust。保存不会把
-              official_cc.inference 写成 http。三种内核搭配在设置 →
-              协议或内核页切换。hello 之后在槽内跑 CLI /usage，失败重试 2
-              次；账号等级以完整官方 usage 为准。hello 默认不常驻。
+              official_cc.inference 写成 http。三种内核搭配在内核页切换。hello
+              之后在槽内跑 CLI /usage，失败重试 2 次；账号等级以完整官方 usage
+              为准。hello 默认不常驻。
             </p>
           </CollapsibleContent>
         </Collapsible>

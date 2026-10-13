@@ -1,13 +1,16 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  SMBIOS_CATALOG,
   VM_CONFIG_DEFAULTS,
   VM_CPU_MODELS,
   VM_MEMORY_OPTIONS,
+  ensureSlotSmbios,
   memoryMiB,
   normalizeVmConfig,
   resolveMachineSpec,
   slotMemory,
+  randomSmbios,
   validateVmConfigPatch,
 } from '../../src/lib/vm/machine-spec.mjs'
 
@@ -137,4 +140,44 @@ test('memoryMiB parses the documented size tokens', () => {
   assert.equal(memoryMiB('1g'), 1024)
   assert.equal(memoryMiB('2G'), 2048)
   assert.equal(memoryMiB(''), 0)
+})
+
+test('create picks a random catalog portrait and an existing brand stays', () => {
+  assert.ok(SMBIOS_CATALOG.length >= 8)
+  const seen = new Set()
+  for (const row of SMBIOS_CATALOG) {
+    for (const key of ['manufacturer', 'product', 'version', 'family']) {
+      assert.equal(validateVmConfigPatch({ smbios: { [key]: row[key] } }).ok, true, `${key} ${row[key]}`)
+    }
+    seen.add(`${row.manufacturer}|${row.product}`)
+  }
+  assert.equal(seen.size, SMBIOS_CATALOG.length)
+
+  const products = new Set()
+  for (let i = 0; i < 48; i += 1) {
+    const row = randomSmbios()
+    assert.ok(SMBIOS_CATALOG.some((item) => item.product === row.product && item.manufacturer === row.manufacturer))
+    products.add(row.product)
+    const created = resolveMachineSpec({})
+    assert.ok(SMBIOS_CATALOG.some((item) => item.product === created.smbios.product))
+    assert.match(created.smbios.serial, /^[A-Z2-9]{7,10}$/)
+    assert.match(created.smbios.uuid, /^[0-9a-f-]{36}$/)
+  }
+  assert.ok(products.size > 1)
+
+  const kept = {
+    id: 'vm-17',
+    machine: {
+      memory: '512m',
+      smbios: { manufacturer: 'Dell Inc.', product: 'OptiPlex 7090', family: 'OptiPlex', serial: 'KEEP', uuid: 'u' },
+    },
+  }
+  assert.equal(ensureSlotSmbios(kept), false)
+  assert.equal(kept.machine.smbios.serial, 'KEEP')
+
+  const bare = { id: 'vm-15', machine: { memory: '512m' } }
+  assert.equal(ensureSlotSmbios(bare), true)
+  assert.equal(bare.machine.memory, '512m')
+  assert.ok(SMBIOS_CATALOG.some((item) => item.product === bare.machine.smbios.product))
+  assert.equal(ensureSlotSmbios(bare), false)
 })

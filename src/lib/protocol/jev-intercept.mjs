@@ -39,9 +39,10 @@ const PATTERN_LEN = 400
 const RULE_MAX = 60
 
 /**
- * User-text only. Official system prompts mention safety and exploits;
- * scanning them would block Claude Code itself. System-side attacks are
- * the distill detector's job (harvest / CoT) or the decision model, when on.
+ * User-authored text only. Official system prompts and tool results quote
+ * safety rules and exploit writeups; scanning them blocks omp itself.
+ * System-side attacks are the distill detector's job (harvest / CoT) or the
+ * decision model, when on.
  */
 export const HARD_POLICY_RULES = Object.freeze([
   { category: 'jailbreak', source: String.raw`\b(?:jailbreak|dan)\s+mode\b` },
@@ -342,7 +343,10 @@ function normalizeRules(raw) {
       enabled: item.enabled !== false,
     })
   }
-  return out
+  // An empty list would swap the shipped rules for nothing while the panel still
+  // reports hard_regex_enabled=true. Fall back to the builtins instead; turn the
+  // layer off with hard_regex_enabled.
+  return out.length ? out : null
 }
 
 const KEY_MAX = 999
@@ -657,9 +661,9 @@ export function matchHardPolicy(text, extra = [], rules = null) {
   return null
 }
 
-/** Hard regex sees user turns only. Quoted or official system text is not scanned. */
+/** Hard regex sees user-authored turns only. Tool results and official system text are not scanned. */
 export function jevDocument(inbound, body = inbound) {
-  return refusalUserDocument(inbound, body)
+  return refusalUserDocument(inbound, body, { includeToolResults: false })
 }
 
 /** Jev also sees the client system. Roleplay tasks put the sexual text there and leave the user turn as a character card. */

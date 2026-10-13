@@ -92,6 +92,7 @@
   },
   "codex": {
     "enabled": true,
+    "catalog_client_version": "auto",
     "protocols": {
       "openai.responses": { "mode": "native", "enabled": true },
       "openai.chat": { "mode": "convert", "enabled": true },

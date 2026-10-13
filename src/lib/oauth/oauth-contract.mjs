@@ -6,13 +6,7 @@ export const CAI_AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize'
 export const PLATFORM = 'https://platform.claude.com'
 export const ANTHROPIC_API = 'https://api.anthropic.com'
 export const TOKEN_URL = `${PLATFORM}/v1/oauth/token`
-export const BOOTSTRAP_URL = `${ANTHROPIC_API}/api/claude_cli/bootstrap?entrypoint=claude-vscode&model=claude-opus-5`
-export const GROVE_SETTINGS_URL = `${PLATFORM}/api/oauth/account/settings`
-export const GROVE_SETTINGS_URLS = Object.freeze([
-  GROVE_SETTINGS_URL,
-  `${ANTHROPIC_API}/api/oauth/account/settings`,
-  `${ANTHROPIC_API}/api/oauth/settings`,
-])
+export const BOOTSTRAP_URL = `${ANTHROPIC_API}/api/claude_cli/bootstrap?entrypoint=claude-code&model=claude-opus-5-5`
 export const FULL_OAUTH_SCOPE =
   'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
 export const BROWSER_AUTHORIZE_UA =

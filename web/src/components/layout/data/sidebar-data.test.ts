@@ -14,6 +14,7 @@ describe('sidebar permissions', () => {
   })
 
   it('keeps the monitoring pages together in hub order', () => {
+    // A stale `usage` capability from an older server must not resurrect the removed page.
     const groups = navGroupsFor([
       'usage',
       'logs',
@@ -27,7 +28,6 @@ describe('sidebar permissions', () => {
       '/overview',
       '/statistics',
       '/logs',
-      '/usage',
     ])
     expect(groups[1].items.map((item) => item.url)).toEqual(['/vm'])
   })

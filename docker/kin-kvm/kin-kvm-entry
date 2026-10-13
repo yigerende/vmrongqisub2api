@@ -321,7 +321,11 @@ QEMU+=(-device "virtio-9p-pci,fsdev=fs_payload,mount_tag=kinpayload")
 log "starting qemu accel=$KIN_KVM_ACCEL cpu=$CPU_MODEL mem=${KIN_KVM_MEMORY_MB}m smp=$KIN_KVM_VCPUS disk=${KIN_KVM_DISK_GB}g uid=$UID_NUM:$GID_NUM"
 # Trixie qemu 10 dropped -runas; drop with setpriv so 9p I/O is the slot uid.
 if [ "$UID_NUM" != 0 ]; then
-  setpriv --reuid="$UID_NUM" --regid="$GID_NUM" --clear-groups -- "${QEMU[@]}" &
+  groups=(--clear-groups)
+  if [ "$KIN_KVM_ACCEL" = kvm ]; then
+    groups=("--groups=$(stat -Lc %g /dev/kvm)")
+  fi
+  setpriv --reuid="$UID_NUM" --regid="$GID_NUM" "${groups[@]}" -- "${QEMU[@]}" &
 else
   "${QEMU[@]}" &
 fi

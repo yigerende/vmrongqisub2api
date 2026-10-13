@@ -4,7 +4,7 @@ import crypto from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
-import { atomicWriteJson, withVmLock } from './vm-file.mjs'
+import { atomicWriteJson, invalidateVmSlotReadCache, withVmLock } from './vm-file.mjs'
 import { getVm, patchVmRecord } from './vm-registry.mjs'
 import { toHostPath, hostMapEntries } from './host-path.mjs'
 import { imageForKernel, OS_CATALOG } from './os-catalog.mjs'
@@ -322,6 +322,7 @@ export async function deleteManagedContainer(root, vm, finalize = () => {}) {
         if (await inspectManagedContainer(current)) throw containerError('container_delete_failed')
       }
       fs.rmSync(paths(root, vm.id).dir, { recursive: true, force: true })
+      invalidateVmSlotReadCache(root, vm.id)
       fs.rmSync(path.join(root, 'vms', `${vm.id}-chat.json`), { force: true })
       await finalize(current)
       return { ok: true }

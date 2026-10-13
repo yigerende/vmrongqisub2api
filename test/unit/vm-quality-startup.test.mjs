@@ -26,6 +26,17 @@ test('real control plane starts with quality monitor and restores saved config a
     },
   }
   gateway = await startGateway(options)
+  const capabilities = await api(gateway, 'GET', '/api/panel/space-capabilities')
+  assert.equal(capabilities.status, 200, capabilities.text)
+  assert.equal(capabilities.json.data.docker_per_slot, true)
+  assert.equal(capabilities.json.data.quality_results, true)
+  const onboarding = await api(gateway, 'GET', '/api/panel/onboarding')
+  assert.equal(onboarding.status, 200, onboarding.text)
+  assert.equal(onboarding.json.data.role, 'admin')
+  assert.ok(onboarding.json.data.steps.some((step) => step.id === 'slot_account'))
+  const dismissed = await api(gateway, 'PUT', '/api/panel/onboarding', { body: { action: 'dismiss' } })
+  assert.equal(dismissed.status, 200, dismissed.text)
+  assert.equal(dismissed.json.data.status, 'dismissed')
   const config = await api(gateway, 'GET', '/api/panel/vm-quality/settings')
   assert.equal(config.status, 200, config.text)
   const saved = await api(gateway, 'PUT', '/api/panel/vm-quality/settings', {
@@ -34,6 +45,9 @@ test('real control plane starts with quality monitor and restores saved config a
   assert.equal(saved.status, 200, saved.text)
   await gateway.stop()
   gateway = await startGateway(options)
+  const onboardingAfterRestart = await api(gateway, 'GET', '/api/panel/onboarding')
+  assert.equal(onboardingAfterRestart.status, 200, onboardingAfterRestart.text)
+  assert.equal(onboardingAfterRestart.json.data.status, 'dismissed')
   const restored = await api(gateway, 'GET', '/api/panel/vm-quality/settings')
   assert.equal(restored.status, 200, restored.text)
   assert.equal(restored.json.data.interval_seconds, 120)

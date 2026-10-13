@@ -86,6 +86,14 @@ export function withRequestProtocolBetas(tokens = [], body = {}) {
   if (body.thinking?.block_binding) add(BETA_THINKING_BINDING_CONTROLS)
   if (body.thread != null) add('message-threads-2026-08-12')
   if (body.diagnostics != null) add(BETA_CACHE_DIAGNOSIS)
+  if (body.fallbacks === 'default') add('server-side-fallback-2026-07-01')
+  else if (Array.isArray(body.fallbacks) && body.fallbacks.length > 0) add('server-side-fallback-2026-06-01')
+  if (
+    typeof body.fallback_credit_token === 'string' &&
+    body.fallback_credit_token.length > 0 &&
+    body.fallback_credit_token.length <= 2048
+  )
+    add(BETA_FALLBACK_CREDIT)
   if (body.cache_control?.evict_on_complete) add('prompt-caching-evict-2026-05-12')
   if (hasHourCache(body) || hasHourCache(body.system) || hasHourCache(body.tools) || hasHourCache(body.messages))
     add(BETA_EXTENDED_CACHE_TTL)

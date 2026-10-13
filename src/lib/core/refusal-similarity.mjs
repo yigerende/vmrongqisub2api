@@ -18,19 +18,27 @@ const STEP = 12
 const MAX_SHINGLES = 4096
 const SLOTS = 128
 
-function contentToText(content) {
+function isToolPayload(block) {
+  if (!block || typeof block !== 'object' || Array.isArray(block)) return false
+  const type = String(block.type || '')
+  if (!type) return false
+  return type === 'tool_result' || type === 'function_call_output' || type.endsWith('_tool_result')
+}
+
+function contentToText(content, includeToolResults = true) {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
     return content
-      .map((part) => contentToText(part))
+      .map((part) => contentToText(part, includeToolResults))
       .filter(Boolean)
       .join('\n')
   }
   if (!content || typeof content !== 'object') return ''
+  if (!includeToolResults && isToolPayload(content)) return ''
   if (typeof content.text === 'string') return content.text
   // Responses items nest their parts one level deeper: message -> content -> input_text.
   if (typeof content.content === 'string') return content.content
-  if (Array.isArray(content.content)) return contentToText(content.content)
+  if (Array.isArray(content.content)) return contentToText(content.content, includeToolResults)
   return ''
 }
 
@@ -38,7 +46,7 @@ function contentToText(content) {
  * Responses `input`: a plain string, or items whose roleless or user-role parts
  * carry the prompt. Assistant / reasoning / tool items are skipped.
  */
-function responsesInputTexts(input) {
+function responsesInputTexts(input, includeToolResults = true) {
   if (typeof input === 'string') return input ? [input] : []
   if (!Array.isArray(input)) return []
   const out = []
@@ -48,34 +56,41 @@ function responsesInputTexts(input) {
       continue
     }
     if (!item || typeof item !== 'object') continue
+    if (!includeToolResults && isToolPayload(item)) continue
     const role = typeof item.role === 'string' ? item.role.toLowerCase() : ''
     if (role && role !== 'user') continue
-    const text = contentToText(item.content === undefined ? item : item.content)
+    const text = contentToText(item.content === undefined ? item : item.content, includeToolResults)
     if (text) out.push(text)
   }
   return out
 }
 
-function userTexts(body) {
+function userTexts(body, includeToolResults = true) {
   if (!body || typeof body !== 'object') return []
   const out = []
   const messages = Array.isArray(body.messages) ? body.messages : []
   for (const message of messages) {
     if (message?.role === 'user') {
-      const text = contentToText(message.content)
+      const text = contentToText(message.content, includeToolResults)
       if (text) out.push(text)
     }
   }
-  out.push(...responsesInputTexts(body.input))
+  out.push(...responsesInputTexts(body.input, includeToolResults))
   return out
 }
 
-/** User turns from inbound, then body, with exact repeats dropped. */
-export function refusalUserDocument(inbound, body = inbound) {
+/**
+ * User turns from inbound, then body, with exact repeats dropped.
+ * Hard regex passes includeToolResults: false. Tool payloads quote the rules
+ * (issue text, command output) and are not the user's ask. Refusal similarity
+ * still sees them.
+ */
+export function refusalUserDocument(inbound, body = inbound, options = {}) {
+  const includeToolResults = options.includeToolResults !== false
   const seen = new Set()
   const parts = []
   for (const src of [inbound, body]) {
-    for (const text of userTexts(src)) {
+    for (const text of userTexts(src, includeToolResults)) {
       const norm = normalizeText(text)
       if (!norm || seen.has(norm)) continue
       seen.add(norm)

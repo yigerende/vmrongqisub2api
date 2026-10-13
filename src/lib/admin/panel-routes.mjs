@@ -16,6 +16,7 @@ import {
   clearPanelSessionCookie,
   revokePanelSession,
   revokePanelSessionsForUser,
+  getPanelAdmin,
 } from '../core/security.mjs'
 import { loadDistillRules, saveDistillRules, validateDistillPatch } from '../core/distill-detect.mjs'
 import { applyRefusalGuardPatch, refusalGuardPolicy } from '../core/refusal-guard.mjs'
@@ -123,6 +124,7 @@ import {
   adoptVmProxyBinding,
   patchVmRecord,
   vmHasClaudeCredential,
+  vmHasSchedulableCredential,
   persistAllowedModels,
   persistSlotEnginePolicy,
   persistVmScheduleLevel,
@@ -151,7 +153,7 @@ import {
 import { makeError, ErrorType, ErrorCode } from '../core/errors.mjs'
 import * as panel from './panel-api.mjs'
 import { GATEWAY_CAPABILITIES } from '../vm/execution-context.mjs'
-import { withVmLock, atomicWriteJson, isValidVmId } from '../vm/vm-file.mjs'
+import { withVmLock, atomicWriteJson, isValidVmId, invalidateVmSlotReadCache } from '../vm/vm-file.mjs'
 import { snapshotDatabaseMetrics } from '../db/database-metrics.mjs'
 import { getUsageCache } from '../oauth/usage-cache.mjs'
 import { getDb, getDbPath } from '../db/database.mjs'
@@ -238,6 +240,16 @@ import { normalizeUsageProbeConfig } from '../oauth/usage-probe-monitor.mjs'
 import { mergeNotifyConfig, publicNotifyConfig, publicRoutingNotify, sendNotifyTest } from './notify.mjs'
 import { UsageLogsView } from '../db/repos/usage-logs-view.mjs'
 import {
+  applyOnboardingAction,
+  buildOnboardingPayload,
+  loadOnboardingState,
+  onboardingRoleOf,
+  onboardingUserOf,
+  recordOf,
+  saveOnboardingState,
+  vmStepFacts,
+} from './onboarding.mjs'
+import {
   StatisticsRepo,
   USER_ROLE_DIMENSIONS,
   normalizeDimension,
@@ -256,6 +268,46 @@ function clusterNodesOf(ctx) {
   } catch {
     return []
   }
+}
+
+function collectOnboardingFacts(req, ctx) {
+  const ident = panelIdentity(req)
+  const ownerUserId = ident.role === 'user' ? req.panelUserId : null
+  const vms = listVms(ctx.cfg.paths.project, ctx.routingConfig)
+  const snap = ctx.proxyPool.panelSnapshot({
+    role: ident.role,
+    ownerUserId: ident.role === 'user' ? req.panelUserId : undefined,
+    vms,
+    nodes: clusterNodesOf(ctx),
+  })
+  const visible = filterVmsForPanel(vms, { role: ident.role, userId: ownerUserId })
+  const keys = ctx.apiKeyStore.snapshot().keys || []
+  const mine =
+    ident.role === 'user' ? keys.filter((k) => normalizeOwnerId(k.user_id) === normalizeOwnerId(req.panelUserId)) : keys
+  const admin = getPanelAdmin()
+  return {
+    envPassword: admin.password,
+    envAdminExists: !!ctx.panelUsers.getByUsername(admin.username),
+    proxyCount: (snap.proxies || []).length,
+    ...vmStepFacts(visible),
+    activeKeyCount: mine.filter((k) => k.status === 'active').length,
+    hasFirstRequest: ctx.requestLog.hasSuccessfulRequest({ owner_user_id: ownerUserId }),
+  }
+}
+
+function onboardingPayloadFor(req, ctx) {
+  const user = onboardingUserOf(req)
+  const role = onboardingRoleOf(req)
+  const rec = recordOf(loadOnboardingState(new SettingsRepo()), user)
+  return buildOnboardingPayload({
+    user,
+    role,
+    status: rec.status,
+    updated_at: rec.updated_at,
+    // cfg.base_url falls back to HOST:PORT (often 0.0.0.0); only an explicit public URL beats the browser origin.
+    base_url: process.env.PUBLIC_BASE_URL || null,
+    facts: collectOnboardingFacts(req, ctx),
+  })
 }
 
 /** Scrolling-log query string → `UsageLogsView` filters. Empty strings are dropped. */
@@ -462,7 +514,7 @@ export function createPanelHandler(ctx) {
 
   function restoreSchedulableIfReady(vmId) {
     const vm = getVm(cfg.paths.project, vmId)
-    if (!vmHasClaudeCredential(vm)) {
+    if (!vmHasSchedulableCredential(vm, cfg.paths.project)) {
       setVmSchedulable(cfg.paths.project, vmId, false, 'no_credential')
       return
     }
@@ -1020,6 +1072,25 @@ export function createPanelHandler(ctx) {
       if (await handleVmQuality({ req, res, url, monitor: ctx.qualityMonitor, readBody, json })) return true
       if (await handleManagedCodex({ req, res, url, cfg, routing: ctx.routingConfig, proxyPool, readBody, json }))
         return true
+      if ((req.method === 'GET' || req.method === 'PUT') && p === '/api/panel/onboarding') {
+        if (req.method === 'PUT') {
+          const body = await readBody(req, 4096).catch(() => ({}))
+          try {
+            const settings = new SettingsRepo()
+            const next = applyOnboardingAction(loadOnboardingState(settings), onboardingUserOf(req), body?.action)
+            saveOnboardingState(settings, next)
+          } catch (e) {
+            if (e.code === 'invalid_action') {
+              return json(res, 400, {
+                ok: false,
+                error: { message: String(e.message || e), code: 'invalid_action' },
+              })
+            }
+            throw e
+          }
+        }
+        return json(res, 200, panel.ok(onboardingPayloadFor(req, ctx)))
+      }
       if (p.startsWith('/api/panel/cluster/')) return ctx.clusterRoutes.handle(req, res, url)
       if (req.method === 'GET' && p === '/api/panel/database/metrics') {
         const snapshot = snapshotDatabaseMetrics({
@@ -2617,6 +2688,7 @@ export function createPanelHandler(ctx) {
             fs.rmSync(path.join(cfg.paths.project, 'vms', id), { recursive: true, force: true })
           } catch {}
           fs.unlinkSync(vmPath)
+          invalidateVmSlotReadCache(cfg.paths.project, id)
           if (active === id) {
             clearActiveVm(cfg.paths.project)
             try {
@@ -3367,7 +3439,7 @@ export function createPanelHandler(ctx) {
         vm = getVm(cfg.paths.project, id) || vm
         const boot = await startSlotReady(vm, cfg.paths.project, { routing: ctx.routingConfig })
         if (!boot.ok) return json(res, 500, { ok: false, error: { message: boot.error || 'runtime start failed' } })
-        const hasCred = vmHasClaudeCredential(vm)
+        const hasCred = vmHasSchedulableCredential(vm, cfg.paths.project)
         vm =
           patchVmRecord(cfg.paths.project, id, {
             status: 'running',
@@ -4727,7 +4799,7 @@ export function createPanelHandler(ctx) {
           (result.proxy?.bound_vm_id ? [result.proxy.bound_vm_id] : [])) {
           const bound = getVm(cfg.paths.project, vmId)
           const reason = String(bound?.schedule_disabled_reason || '')
-          if (vmHasClaudeCredential(bound) && reason !== 'disabled' && reason !== 'stopped') {
+          if (vmHasSchedulableCredential(bound, cfg.paths.project) && reason !== 'disabled' && reason !== 'stopped') {
             setVmSchedulable(cfg.paths.project, vmId, true, null)
           }
         }

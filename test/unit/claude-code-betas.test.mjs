@@ -142,3 +142,27 @@ test('request gates preserve caller opt-ins and remain isolated between requests
   assert.ok(!enabled.includes('timing-2026-09-09'))
   assert.deepEqual(withRequestProtocolBetas(['caller-beta'], { model: 'claude-sonnet-4-6' }), ['caller-beta'])
 })
+
+test('explicit fallback requests arm only the corresponding server beta', () => {
+  const defaultFallback = withRequestProtocolBetas([], { fallbacks: 'default' })
+  assert.ok(defaultFallback.includes('server-side-fallback-2026-07-01'))
+  assert.ok(!defaultFallback.includes('server-side-fallback-2026-06-01'))
+  const explicitFallback = withRequestProtocolBetas([], {
+    fallbacks: [{ model: 'claude-sonnet-5-5' }],
+  })
+  assert.ok(explicitFallback.includes('server-side-fallback-2026-06-01'))
+  assert.ok(!explicitFallback.includes('server-side-fallback-2026-07-01'))
+  assert.deepEqual(withRequestProtocolBetas([], { fallbacks: [] }), [])
+  assert.deepEqual(withRequestProtocolBetas([], {}), [])
+})
+
+test('credit replay arms its beta only for an official bounded token', () => {
+  const creditBeta = 'fallback-credit-2026-06-01'
+  assert.ok(withRequestProtocolBetas([], { fallback_credit_token: 'credit' }).includes(creditBeta))
+  assert.ok(withRequestProtocolBetas([], { fallback_credit_token: 'x'.repeat(2048) }).includes(creditBeta))
+  for (const token of ['', 'x'.repeat(2049), null, 42]) {
+    assert.ok(!withRequestProtocolBetas([], { fallback_credit_token: token }).includes(creditBeta))
+  }
+  assert.deepEqual(withRequestProtocolBetas([creditBeta], { fallback_credit_token: 'credit' }), [creditBeta])
+  assert.deepEqual(withRequestProtocolBetas([], {}), [])
+})

@@ -1529,10 +1529,11 @@ function systemHasOfficialBillingBlock(system) {
 
 /**
  * An upstream API gateway forwarding real Claude Code rewrites the UA to
- * Go-http-client. sub2api keeps the body when it still has the billing block.
- * Some relays also drop that block and only forward the client beta
- * (`claude-code-20250219`) plus the official system text and user_id.
- * The identity line alone is not enough: third-party tools copy it.
+ * Go-http-client. The billing block is the signal third-party clients do not
+ * send, and some relays (NewAPI) keep that block while dropping metadata.user_id.
+ * A relay that also drops the block still counts when the client beta
+ * (`claude-code-20250219`), the official system text, and a valid user_id
+ * all survive. The identity line alone is not enough: third-party tools copy it.
  */
 function headerBetaTokens(headers = {}) {
   const raw = headers?.['anthropic-beta'] || headers?.['Anthropic-Beta'] || ''
@@ -1551,9 +1552,11 @@ function systemLooksLikeRelayedClaudeCode(system) {
 export function isProxiedOfficialClaudeCode(body = {}, headers = {}) {
   if (!body || typeof body !== 'object') return false
   if (looksLikeOhMyPiSystem(body?.system)) return false
-  if (!isValidOfficialUserId(body?.metadata?.user_id)) return false
   if (inboundHasOpenAIToolShape(body)) return false
+  // Billing block first: NewAPI keeps it and may drop user_id. local-agent
+  // already returned above.
   if (systemHasOfficialBillingBlock(body?.system)) return true
+  if (!isValidOfficialUserId(body?.metadata?.user_id)) return false
   return headerBetaTokens(headers).includes('claude-code-20250219') && systemLooksLikeRelayedClaudeCode(body?.system)
 }
 

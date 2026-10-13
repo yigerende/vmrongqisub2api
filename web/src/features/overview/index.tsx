@@ -48,7 +48,7 @@ function AlertChip({
   tone,
 }: {
   t: string
-  to: '/import' | '/usage' | '/cluster' | '/overview' | '/logs' | '/vm'
+  to: '/import' | '/cluster' | '/overview' | '/logs' | '/vm'
   tone: AlertTone
 }) {
   return (
@@ -123,15 +123,15 @@ export function OverviewPage() {
   ).length
   const alerts: {
     t: string
-    to: '/import' | '/usage' | '/cluster' | '/overview' | '/logs' | '/vm'
+    to: '/import' | '/cluster' | '/overview' | '/logs' | '/vm'
     tone: AlertTone
   }[] = []
   if (available === 0 && withToken)
     alerts.push({ t: '无可用账号', to: '/import', tone: 'bad' })
   if (warned > 0)
-    alerts.push({ t: `${warned} 警告`, to: '/usage', tone: 'caution' })
+    alerts.push({ t: `${warned} 警告`, to: '/vm', tone: 'caution' })
   if (limited > 0)
-    alerts.push({ t: `${limited} 限制`, to: '/usage', tone: 'warn' })
+    alerts.push({ t: `${limited} 限制`, to: '/vm', tone: 'warn' })
   if (noToken > 0 && withToken === 0)
     alerts.push({ t: '无凭证', to: '/import', tone: 'bad' })
   if (fableCool > 0)

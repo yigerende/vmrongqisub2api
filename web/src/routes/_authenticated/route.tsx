@@ -11,10 +11,9 @@ import { FleetActions } from '@/features/fleet/fleet-actions'
 export const Route = createFileRoute('/_authenticated')({
   beforeLoad: ({ location }) => {
     if (!hasSession()) {
-      throw redirect({
-        to: '/login',
-        search: { redirect: location.href },
-      })
+      // Bare console entry is the public welcome; deep links go to the sign-in page.
+      if (location.pathname === '/') throw redirect({ to: '/welcome' })
+      throw redirect({ to: '/login', search: { redirect: location.href } })
     }
   },
   component: Authenticated,
@@ -31,10 +30,7 @@ function Authenticated() {
   useEffect(() => {
     if (meQuery.error instanceof ApiError && meQuery.error.status === 401) {
       signOut()
-      navigate({
-        to: '/login',
-        search: { redirect: undefined },
-      })
+      navigate({ to: '/login' })
     }
   }, [meQuery.error, signOut, navigate])
   if (meQuery.error instanceof ApiError && meQuery.error.status === 401) {

@@ -24,11 +24,6 @@ export type CacheBreakpoints = {
 
 export const DEFAULT_CACHE_TTL: CacheTtl = '1h'
 
-export const CACHE_TTL_OPTIONS: [CacheTtl, string][] = [
-  ['1h', '1 小时'],
-  ['5m', '5 分钟'],
-]
-
 export const DEFAULT_CACHE_BREAKPOINTS: CacheBreakpoints = {
   enabled: true,
   preserve_client: true,

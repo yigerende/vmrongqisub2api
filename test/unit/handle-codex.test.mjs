@@ -402,6 +402,104 @@ test('nested Responses cached_tokens reaches the request log cache column', asyn
   fs.rmSync(root, { recursive: true, force: true })
 })
 
+test('request log first_token_ms uses firstTokenAt minus injected ingress t0', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-ttft-'))
+  writeGptVm(root, 'vm-gpt-a')
+  const res = {
+    headersSent: false,
+    write() {
+      this.headersSent = true
+    },
+    end() {
+      this.ended = true
+    },
+  }
+  const t0 = 1_700_000_000_000
+  const logBag = {}
+  await handleCodexProtocol({
+    req: { headers: {} },
+    res,
+    protocol: 'openai.responses',
+    ctx: { body: { model: 'gpt-5.4', input: [], stream: true } },
+    inbound: { stream: true },
+    logBag,
+    stats: { errors: 0, requests: 0, by_route: {} },
+    json: (_res, status, body) => {
+      res.statusCode = status
+      res.body = body
+      return body
+    },
+    writeSSEHeaders() {
+      res.headersSent = true
+    },
+    routing: {},
+    projectRoot: root,
+    requestStartedAt: t0,
+    ops: {
+      writeCodexKernelConfig() {},
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: async () => ({
+        ok: true,
+        status: 200,
+        terminalState: 'verified',
+        ttftMs: 300,
+        firstTokenAt: t0 + 1500,
+        usage: { input_tokens: 4, output_tokens: 1 },
+      }),
+    },
+  })
+  assert.equal(logBag.first_token_ms, 1500)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('request log first_token_ms falls back to hop ttftMs without firstTokenAt', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-ttft-fb-'))
+  writeGptVm(root, 'vm-gpt-a')
+  const res = {
+    headersSent: false,
+    write() {
+      this.headersSent = true
+    },
+    end() {
+      this.ended = true
+    },
+  }
+  const logBag = {}
+  await handleCodexProtocol({
+    req: { headers: {} },
+    res,
+    protocol: 'openai.responses',
+    ctx: { body: { model: 'gpt-5.4', input: [], stream: true } },
+    inbound: { stream: true },
+    logBag,
+    stats: { errors: 0, requests: 0, by_route: {} },
+    json: (_res, status, body) => {
+      res.statusCode = status
+      res.body = body
+      return body
+    },
+    writeSSEHeaders() {
+      res.headersSent = true
+    },
+    routing: {},
+    projectRoot: root,
+    requestStartedAt: 1_700_000_000_000,
+    ops: {
+      writeCodexKernelConfig() {},
+      ensureCodexKernel: async () => ({ ok: true }),
+      streamCodexKernel: async () => ({
+        ok: true,
+        status: 200,
+        terminalState: 'verified',
+        ttftMs: 300,
+        usage: { input_tokens: 4, output_tokens: 1 },
+      }),
+    },
+  })
+  assert.equal(logBag.first_token_ms, 300)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
 test('incomplete Responses stream still bills tokens from the completed event', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-codex-bill-'))
   writeGptVm(root, 'vm-gpt-a')

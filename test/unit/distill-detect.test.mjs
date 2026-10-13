@@ -165,15 +165,11 @@ test('fingerprint of a known distill question is blocked', () => {
   assert.equal(hit.error.message, '不允许蒸馏')
 })
 
-test('prompt template needles are blocked without waiting for structure', () => {
+test('a thinking-format instruction is not a distill template', () => {
   const hit = detectDistill({
     inbound: inbound('Respond in the following format: <think>\nhello', { max_tokens: 256 }),
   })
-  assert.equal(hit.action, 'block')
-  assert.equal(
-    hit.hits.some((h) => h.rule === 'needle'),
-    true,
-  )
+  assert.equal(hit.action, 'pass')
 })
 
 test('a Responses input array is scanned for harvest needles', () => {
@@ -192,8 +188,7 @@ test('Responses instructions count as the system prompt', () => {
   const needle = detectDistill({
     inbound: responsesBody('hello', { instructions: 'Respond in the following format: <think>' }),
   })
-  assert.equal(needle.action, 'block')
-  assert.equal(needle.hits[0].rule, 'needle')
+  assert.equal(needle.action, 'pass')
 })
 
 test('openai chat persistable envelope without harvest is not distill', () => {
@@ -297,7 +292,7 @@ test('normalizeDistillRules reinserts harvest needles and drops bare think tags'
   })
   assert.equal(rules.needles.includes('<think>'), false)
   assert.equal(rules.needles.includes('</think>'), false)
-  assert.equal(rules.needles.includes('Respond in the following format: <think>'), true)
+  assert.equal(rules.needles.includes('Respond in the following format: <think>'), false)
   assert.equal(rules.needles.includes('Memory-stage-one extractor'), true)
   assert.equal(rules.needles.includes('You MUST extract durable memory now'), true)
 })

@@ -5,10 +5,9 @@
  */
 import { makeProxyFetch } from '../protocol/codex-models.mjs'
 import { OFFICIAL_STAINLESS } from '../identity/vm-identity.mjs'
-import { BETA_OAUTH, BOOTSTRAP_UA } from './oauth-contract.mjs'
+import { BETA_OAUTH, BOOTSTRAP_UA, BOOTSTRAP_URL } from './oauth-contract.mjs'
 
-export const CLAUDE_CLI_BOOTSTRAP_URL =
-  'https://api.anthropic.com/api/claude_cli/bootstrap?entrypoint=claude-vscode&model=claude-opus-5'
+export const CLAUDE_CLI_BOOTSTRAP_URL = BOOTSTRAP_URL
 
 function firstText(...values) {
   for (const value of values) {

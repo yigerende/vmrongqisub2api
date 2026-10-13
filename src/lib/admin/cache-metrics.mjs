@@ -8,13 +8,15 @@ export function cacheHitStats({
   input_tokens = 0,
   cache_read_tokens = 0,
   cache_creation_tokens = 0,
+  prompt_tokens = null,
   scheme = 'anthropic',
 } = {}) {
   const input = Number(input_tokens) || 0
   const read = Number(cache_read_tokens) || 0
   const write = Number(cache_creation_tokens) || 0
   const openai = String(scheme || '').toLowerCase() === 'openai'
-  const prompt = openai ? input : input + read + write
+  // Mixed-provider aggregates supply a denominator computed per usage row.
+  const prompt = prompt_tokens == null ? (openai ? input : input + read + write) : Number(prompt_tokens) || 0
   return {
     input_tokens: input,
     cache_read_tokens: read,

@@ -362,7 +362,7 @@ function ClaudeGates({
         <StepperSetting
           id='claude-large-cold-tokens'
           label='大额冷缓存阈值'
-          desc='预估未命中缓存 token（含 max_tokens）达到此值视为大额。默认 10 万：高于普通一轮，低于现场 50 万缓存写入样本。'
+          desc='预估未命中缓存的输入 token 达到此值视为大额。冷请求算整段 prompt，已确认热前缀只算最后一条 user，不含 max_tokens。默认 10 万：高于普通一轮，低于现场 50 万缓存写入样本。'
           value={Math.round(
             numberOf(quota.large_cold_uncached_tokens, 100000) / 1000
           )}

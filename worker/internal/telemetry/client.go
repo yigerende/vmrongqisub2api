@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	batchPath           = "/api/event_logging/batch"
+	batchPath           = "/api/event_logging/v2/batch"
 	growthbookClientKey = "sdk-zAZezfDKGoZuXXKe"
 	evalPath            = "/api/eval/" + growthbookClientKey
 )

@@ -24,11 +24,7 @@ import { QueryGate } from '@/components/query-gate'
 import { dashboardQueryOptions } from '@/features/overview/queries'
 import { AboutPane } from '@/features/settings/about-pane'
 import { BackupPane } from '@/features/settings/backup-pane'
-import { CacheBreakpointsPane } from '@/features/settings/cache-breakpoints-pane'
-import { ClaudeCodeOnlyPane } from '@/features/settings/claude-code-only-pane'
-import { GptPane } from '@/features/settings/gpt-pane'
 import { HealthPane } from '@/features/settings/health-pane'
-import { KernelRoutingPane } from '@/features/settings/kernel-routing-pane'
 import { LogsPane } from '@/features/settings/logs-pane'
 import {
   SETTINGS_TAB_LABELS,
@@ -40,6 +36,7 @@ import { OfficialCcSettingsPane } from '@/features/settings/official-cc-pane'
 import { PersonaRulesPane } from '@/features/settings/persona-rules-pane'
 import { PoolPane } from '@/features/settings/pool-pane'
 import { inheritProtocolOnSlots } from '@/features/settings/protocol-authority'
+import { ProtocolPane } from '@/features/settings/protocol-pane'
 import {
   notifyQueryOptions,
   routingQueryOptions,
@@ -373,36 +370,21 @@ export function SettingsPage() {
                 />
               ) : null}
               {tab === 'protocol' ? (
-                <>
-                  <GptPane
-                    value={
-                      (draft.codex as Record<string, unknown> | undefined) || {}
-                    }
-                    onChange={(next) => setDraft({ ...draft, codex: next })}
-                  />
-                  <KernelRoutingPane
-                    value={inference}
-                    onChange={(next) => setDraft({ ...draft, inference: next })}
-                  />
-                  <CacheBreakpointsPane
-                    compat={
-                      (draft.compatibility as
-                        Record<string, unknown> | undefined) || {}
-                    }
-                    onChange={(next) =>
-                      setDraft({ ...draft, compatibility: next })
-                    }
-                  />
-                  <ClaudeCodeOnlyPane
-                    compat={
-                      (draft.compatibility as
-                        Record<string, unknown> | undefined) || {}
-                    }
-                    onChange={(next) =>
-                      setDraft({ ...draft, compatibility: next })
-                    }
-                  />
-                </>
+                <ProtocolPane
+                  compat={
+                    (draft.compatibility as
+                      Record<string, unknown> | undefined) || {}
+                  }
+                  codex={
+                    (draft.codex as Record<string, unknown> | undefined) || {}
+                  }
+                  onCompatChange={(next) =>
+                    setDraft((current) => ({ ...current, compatibility: next }))
+                  }
+                  onCodexChange={(next) =>
+                    setDraft((current) => ({ ...current, codex: next }))
+                  }
+                />
               ) : null}
               {tab === 'whitelist' ? (
                 <PersonaRulesPane

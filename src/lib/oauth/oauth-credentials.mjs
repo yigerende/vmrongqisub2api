@@ -316,6 +316,7 @@ function chownSlotCredentialFile(homeDir, file) {
 
 function sealSlotCredentialFile(file) {
   if (!file) return
+  // Slot Claude must not rewrite the shared RT; that drops kinGeneration.
   try {
     fs.chmodSync(file, 0o444)
   } catch {}
@@ -388,12 +389,14 @@ export function writeWorkerCredentialFile(homeDir, cred) {
   if (isAnySetupTokenMode(mode)) oauth.type = mode
 
   if (subscriptionType) oauth.subscriptionType = subscriptionType
+  const generation = Number(n._token_version || cred.kinGeneration || cred.kin_generation) || Date.now()
+  oauth.kinGeneration = generation
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
   ensureSlotClaudeOwnership(homeDir)
   try {
     if (fs.existsSync(file)) fs.chmodSync(file, 0o600)
   } catch {}
-  atomicWriteJson(file, { type: mode, authScheme, claudeAiOauth: oauth }, { mode: 0o600 })
+  atomicWriteJson(file, { type: mode, authScheme, kinGeneration: generation, claudeAiOauth: oauth }, { mode: 0o600 })
   chownSlotCredentialFile(homeDir, file)
   sealSlotCredentialFile(file)
   ensureOfficialCredentialLink(homeDir)

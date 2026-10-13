@@ -18,3 +18,14 @@ test('openai hit rate is read over input that already includes cache', () => {
   assert.equal(s.prompt_tokens, 100)
   assert.equal(s.cache_hit_rate, 80 / 100)
 })
+
+test('mixed-provider aggregates keep an explicit prompt_tokens denominator', () => {
+  const s = cacheHitStats({
+    input_tokens: 105,
+    cache_read_tokens: 190,
+    cache_creation_tokens: 0,
+    prompt_tokens: 200,
+  })
+  assert.equal(s.prompt_tokens, 200)
+  assert.equal(s.cache_hit_rate, 190 / 200)
+})

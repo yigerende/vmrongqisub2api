@@ -536,11 +536,13 @@ export async function buildDashboard({
       tokens_out: accounts.reduce((s, a) => s + (a.tokens_out || 0), 0),
       cache_read_tokens: accounts.reduce((s, a) => s + (a.cache_read_tokens || 0), 0),
       cache_creation_tokens: accounts.reduce((s, a) => s + (a.cache_creation_tokens || 0), 0),
-      ...cacheHitStats({
-        input_tokens: accounts.reduce((s, a) => s + (a.tokens_in || 0), 0),
-        cache_read_tokens: accounts.reduce((s, a) => s + (a.cache_read_tokens || 0), 0),
-        cache_creation_tokens: accounts.reduce((s, a) => s + (a.cache_creation_tokens || 0), 0),
-      }),
+      ...cacheHitStats(
+        billing?.total || {
+          input_tokens: accounts.reduce((s, a) => s + (a.tokens_in || 0), 0),
+          cache_read_tokens: accounts.reduce((s, a) => s + (a.cache_read_tokens || 0), 0),
+          cache_creation_tokens: accounts.reduce((s, a) => s + (a.cache_creation_tokens || 0), 0),
+        },
+      ),
       fable_max_per_account: Number(
         routingConfig?.concurrency?.fable_max_per_account ?? pool.fable_max_per_account ?? 4,
       ),
@@ -1259,11 +1261,13 @@ export function buildUsage({ accountQuota, cfg, requestLog = null }) {
       tokens_out: accounts.reduce((s, a) => s + (a.tokens_out || 0), 0),
       cache_read_tokens: accounts.reduce((s, a) => s + (a.cache_read_tokens || 0), 0),
       cache_creation_tokens: accounts.reduce((s, a) => s + (a.cache_creation_tokens || 0), 0),
-      ...cacheHitStats({
-        input_tokens: accounts.reduce((s, a) => s + (a.tokens_in || 0), 0),
-        cache_read_tokens: accounts.reduce((s, a) => s + (a.cache_read_tokens || 0), 0),
-        cache_creation_tokens: accounts.reduce((s, a) => s + (a.cache_creation_tokens || 0), 0),
-      }),
+      ...cacheHitStats(
+        billing?.total || {
+          input_tokens: accounts.reduce((s, a) => s + (a.tokens_in || 0), 0),
+          cache_read_tokens: accounts.reduce((s, a) => s + (a.cache_read_tokens || 0), 0),
+          cache_creation_tokens: accounts.reduce((s, a) => s + (a.cache_creation_tokens || 0), 0),
+        },
+      ),
       today_cost: billing?.today?.total_cost || 0,
       total_cost: billing?.total?.total_cost || 0,
       peak_5h: Math.max(0, ...accounts.map((a) => a.utilization_5h), 0),

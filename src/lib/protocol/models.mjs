@@ -1,7 +1,7 @@
 /**
  * Gateway model catalog.
  * Claude: console model-policy. GPT: gpt_model_policy from Codex /codex/models.
- * GET /v1/models returns both. Never hop a slot worker `/internal/v1/models`.
+ * GET /v1/models returns the families the key's group_type may schedule. Never hop a slot worker `/internal/v1/models`.
  */
 
 import {
@@ -59,14 +59,17 @@ function listGptPublicModels() {
   }
 }
 
-/** Local catalog for GET /v1/models and boot. Does not touch workers. */
-export function gatewayModelCatalog() {
+/**
+ * Local catalog for GET /v1/models and boot. Does not touch workers.
+ * groupType is the key's group_type: openai lists GPT only, anthropic lists Claude only, all lists both.
+ */
+export function gatewayModelCatalog({ groupType = 'all' } = {}) {
   seedModelCatalog()
   try {
     loadModelPolicy()
   } catch {}
-  const gpt = listGptPublicModels()
-  const claude = listOfficialModels()
+  const gpt = groupType === 'anthropic' ? [] : listGptPublicModels()
+  const claude = groupType === 'openai' ? [] : listOfficialModels()
   return {
     object: 'list',
     data: [...gpt, ...claude],

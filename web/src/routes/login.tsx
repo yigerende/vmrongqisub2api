@@ -3,11 +3,12 @@ import { hasSession } from '@/lib/session'
 import { LoginPage } from '@/features/auth/login-page'
 
 export const Route = createFileRoute('/login')({
-  validateSearch: (search: Record<string, unknown>) => ({
-    redirect: typeof search.redirect === 'string' ? search.redirect : undefined,
-  }),
+  validateSearch: (search: Record<string, unknown>): { redirect?: string } =>
+    typeof search.redirect === 'string' && search.redirect
+      ? { redirect: search.redirect }
+      : {},
   beforeLoad: () => {
-    if (hasSession()) throw redirect({ to: '/overview' })
+    if (hasSession()) throw redirect({ to: '/' })
   },
   component: LoginPage,
 })

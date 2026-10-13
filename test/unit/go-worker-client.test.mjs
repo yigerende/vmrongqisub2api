@@ -232,6 +232,18 @@ async function fixture(handler) {
   }
 }
 
+function writeData(res, event) {
+  res.write(`data: ${JSON.stringify(event)}\n\n`)
+}
+
+function gate() {
+  let release
+  const ready = new Promise((resolve) => {
+    release = resolve
+  })
+  return { ready, release }
+}
+
 unixTest('callGoWorker sends envelope over authenticated Unix socket', async () => {
   const fx = await fixture(async (req, res) => {
     assert.equal(req.headers['x-internal-token'], 'internal-test')
@@ -442,7 +454,229 @@ unixTest('streamGoWorker accepts message_stop with usage trailers', async () => 
     assert.equal(result.usage.input_tokens, 12)
     assert.equal(result.model, 'claude-haiku-4-5-20251001')
     assert.equal(result.stopReason, 'end_turn')
+    assert.equal(result.ttftMs, null)
+    assert.equal(result.firstTokenAt, null)
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker does not stamp TTFT on metadata-only Responses complete', async () => {
+  const fx = await fixture((req, res) => {
+    res.setHeader('content-type', 'text/event-stream')
+    res.setHeader('trailer', 'x-terminal-state, x-usage, x-model, x-stop-reason')
+    writeData(res, { type: 'response.created', response: { id: 'resp_1', model: 'gpt-5.4' } })
+    writeData(res, { type: 'response.in_progress', response: { id: 'resp_1' } })
+    writeData(res, {
+      type: 'response.completed',
+      response: { id: 'resp_1', model: 'gpt-5.4', usage: { input_tokens: 12, output_tokens: 0 } },
+    })
+    res.addTrailers({
+      'x-terminal-state': 'verified',
+      'x-usage': JSON.stringify({ input_tokens: 12, output_tokens: 0 }),
+      'x-model': 'gpt-5.4',
+      'x-stop-reason': 'completed',
+    })
+    res.end()
+  })
+  try {
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      body: { model: 'gpt-5.4', stream: true, input: [] },
+      onEvent: () => {},
+    })
+    assert.equal(result.usage.input_tokens, 12)
+    assert.equal(result.model, 'gpt-5.4')
+    assert.equal(result.stopReason, 'completed')
+    assert.equal(result.ttftMs, null)
+    assert.equal(result.firstTokenAt, null)
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker stamps TTFT on a name-only tool_use with no parameter delta', async () => {
+  const fx = await fixture((req, res) => {
+    res.setHeader('content-type', 'text/event-stream')
+    writeData(res, { type: 'message_start', message: { model: 'claude-haiku-4-5-20251001' } })
+    writeData(res, {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} },
+    })
+    writeData(res, { type: 'content_block_stop', index: 0 })
+    writeData(res, { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 12 } })
+    writeData(res, { type: 'message_stop' })
+    res.end()
+  })
+  try {
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-haiku-4-5-20251001', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      onEvent: () => {},
+    })
+    assert.equal(result.ok, true)
+    assert.equal(result.stopReason, 'tool_use')
     assert.ok(result.ttftMs != null && result.ttftMs >= 0)
+    assert.ok(Number.isFinite(result.firstTokenAt) && result.firstTokenAt > 1_000_000_000_000)
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker stamps TTFT on a Responses function name, not response.created', async () => {
+  const fx = await fixture((req, res) => {
+    res.setHeader('content-type', 'text/event-stream')
+    res.setHeader('trailer', 'x-terminal-state, x-model')
+    writeData(res, { type: 'response.created', response: { id: 'resp_1', model: 'gpt-5.4' } })
+    writeData(res, {
+      type: 'response.output_item.added',
+      item: { type: 'function_call', name: 'Read', arguments: '', call_id: 'c1' },
+    })
+    writeData(res, { type: 'response.completed', response: { id: 'resp_1', model: 'gpt-5.4' } })
+    res.addTrailers({ 'x-terminal-state': 'verified', 'x-model': 'gpt-5.4' })
+    res.end()
+  })
+  try {
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      body: { model: 'gpt-5.4', stream: true, input: [] },
+      onEvent: () => {},
+    })
+    assert.ok(result.ttftMs != null && result.ttftMs >= 0)
+    assert.ok(Number.isFinite(result.firstTokenAt) && result.firstTokenAt > 1_000_000_000_000)
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker stamps firstTokenAt on the emitted tool name, not later args', async () => {
+  const sawName = gate()
+  let argsWrittenAt = null
+  const fx = await fixture(async (req, res) => {
+    res.setHeader('content-type', 'text/event-stream')
+    writeData(res, { type: 'message_start', message: { model: 'claude-haiku-4-5-20251001' } })
+    writeData(res, {
+      type: 'content_block_start',
+      index: 0,
+      content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} },
+    })
+    await sawName.ready
+    argsWrittenAt = Date.now()
+    writeData(res, {
+      type: 'content_block_delta',
+      index: 0,
+      delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' },
+    })
+    writeData(res, { type: 'message_delta', delta: { stop_reason: 'tool_use' } })
+    writeData(res, { type: 'message_stop' })
+    res.end()
+  })
+  try {
+    let nameSeenAt = null
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-haiku-4-5-20251001', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      onEvent: (line) => {
+        if (nameSeenAt == null && line.includes('"name":"Read"')) {
+          nameSeenAt = Date.now()
+          sawName.release()
+        }
+      },
+    })
+    assert.ok(result.ttftMs != null && result.ttftMs >= 0)
+    assert.ok(Number.isFinite(result.firstTokenAt))
+    assert.ok(result.firstTokenAt <= nameSeenAt)
+    assert.ok(result.firstTokenAt <= argsWrittenAt)
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker stamps TTFT on text and thinking deltas', async () => {
+  for (const delta of [
+    { type: 'text_delta', text: 'hello' },
+    { type: 'thinking_delta', thinking: 'hmm' },
+  ]) {
+    const fx = await fixture((req, res) => {
+      res.setHeader('content-type', 'text/event-stream')
+      writeData(res, { type: 'message_start', message: { model: 'claude-haiku-4-5-20251001' } })
+      writeData(res, {
+        type: 'content_block_start',
+        index: 0,
+        content_block: { type: delta.text != null ? 'text' : 'thinking', text: '', thinking: '' },
+      })
+      writeData(res, { type: 'content_block_delta', index: 0, delta })
+      writeData(res, { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 1 } })
+      writeData(res, { type: 'message_stop' })
+      res.end()
+    })
+    try {
+      const result = await streamGoWorker({
+        exec: fx.exec,
+        body: { model: 'claude-haiku-4-5-20251001', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+        onEvent: () => {},
+      })
+      assert.equal(result.ok, true, delta.type)
+      assert.ok(result.ttftMs != null && result.ttftMs >= 0, delta.type)
+      assert.ok(Number.isFinite(result.firstTokenAt), delta.type)
+    } finally {
+      await fx.close()
+    }
+  }
+})
+
+unixTest('streamGoWorker keeps observed firstTokenAt when the client cancels', async () => {
+  const sawText = gate()
+  const fx = await fixture(async (req, res) => {
+    if (req.url === '/internal/v1/cancel') {
+      res.setHeader('content-type', 'application/json')
+      res.end('{"ok":true,"cancelled":true}')
+      return
+    }
+    res.setHeader('content-type', 'text/event-stream')
+    writeData(res, { type: 'message_start', message: {} })
+    writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } })
+    await sawText.ready
+  })
+  try {
+    const controller = new AbortController()
+    const pending = streamGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-test', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      signal: controller.signal,
+      onEvent: (line) => {
+        if (String(line).includes('text_delta')) sawText.release()
+      },
+    })
+    await sawText.ready
+    controller.abort()
+    const result = await pending
+    assert.equal(result.body.error.code, 'client_cancelled')
+    assert.ok(result.ttftMs != null && result.ttftMs >= 0)
+    assert.ok(Number.isFinite(result.firstTokenAt))
+  } finally {
+    await fx.close()
+  }
+})
+
+unixTest('streamGoWorker keeps observed firstTokenAt when a later error ends the hop', async () => {
+  const fx = await fixture((req, res) => {
+    res.setHeader('content-type', 'text/event-stream')
+    writeData(res, { type: 'message_start', message: { model: 'claude-haiku-4-5-20251001' } })
+    writeData(res, { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } })
+    writeData(res, { type: 'error', error: { type: 'api_error', message: 'upstream failed' } })
+    res.end()
+  })
+  try {
+    const result = await streamGoWorker({
+      exec: fx.exec,
+      body: { model: 'claude-haiku-4-5-20251001', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      onEvent: () => {},
+    })
+    assert.equal(result.ok, false)
+    assert.ok(result.ttftMs != null && result.ttftMs >= 0)
+    assert.ok(Number.isFinite(result.firstTokenAt))
   } finally {
     await fx.close()
   }

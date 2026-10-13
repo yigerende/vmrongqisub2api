@@ -2,15 +2,20 @@
  * Best-effort size/cache risk for the 5h/7d critical band.
  *
  * Does not convert dollars to percent. Cache hits and final output cannot be
- * known before the hop; the estimate is conservative (over-counts uncached
- * tokens) so a huge cold prompt is not admitted on a 79% reading.
+ * known before the hop. The number compared to the threshold is marginal
+ * cache-miss input: the whole prompt when cold, or only the last user turn
+ * when this account+session prefix is confirmed warm. max_tokens is an output
+ * ceiling, not a cache write, and is not added (#385).
  */
 import { peekCachePrefix } from '../protocol/cache-prefix.mjs'
 
 /**
- * 100k uncached tokens: well above a normal turn (usually <10k new tokens)
- * and well below the #342 sample (514k cache-write). Includes max_tokens so a
- * 80k cold prompt with a 64k output cap is treated as large.
+ * 100k cache-miss tokens: above a normal turn (usually <10k new tokens) and
+ * below the #342 sample (514k cache-write). Do not add max_tokens. Claude Code
+ * and the gateway default both use 128000, so the ceiling alone used to clear
+ * this line and the critical band rejected every Opus request (#385). A cold
+ * prompt under the threshold is still admitted; lower
+ * large_cold_uncached_tokens to catch it instead of putting the ceiling back.
  */
 export const DEFAULT_LARGE_COLD_UNCACHED_TOKENS = 100_000
 /** Unknown images are treated as uncached vision tiles. */
@@ -139,7 +144,7 @@ export function estimateRequestRisk(
 ) {
   const parts = cachedPromptParts(body, quotaRequest)
   const cache = cacheColdForAccount({ accountId, sessionId, body, now })
-  const uncached = cache.cold ? parts.prompt + parts.maxOut : parts.lastUser + parts.maxOut
+  const uncached = cache.cold ? parts.prompt : parts.lastUser
   return {
     estimatedPromptTokens: parts.prompt,
     maxTokens: parts.maxOut,

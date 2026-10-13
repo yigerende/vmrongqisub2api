@@ -146,7 +146,7 @@ test('gatewayModelCatalog stays local and never hops', () => {
   )
   const src = fs.readFileSync(new URL('../../src/server.mjs', import.meta.url), 'utf8')
   assert.equal(src.includes('callWorkerGet'), false)
-  assert.match(src, /return gatewayModelCatalog\(\)/)
+  assert.match(src, /return gatewayModelCatalog\([a-z]*\)/)
 })
 
 test('models module never talks to Anthropic or a CLI binary', () => {
@@ -156,4 +156,16 @@ test('models module never talks to Anthropic or a CLI binary', () => {
   assert.equal(src.includes('spawnSync'), false)
   assert.equal(src.includes('child_process'), false)
   assert.equal(/user-agent.*claude-cli/.test(src), false)
+})
+
+test('gatewayModelCatalog filters by key group_type', () => {
+  clearModelsCache()
+  const all = gatewayModelCatalog().data
+  const isGpt = (m) => m.owned_by === 'openai'
+  assert.ok(all.some(isGpt) && all.some((m) => !isGpt(m)))
+  const openai = gatewayModelCatalog({ groupType: 'openai' }).data
+  assert.ok(openai.length > 0 && openai.every(isGpt))
+  const anthropic = gatewayModelCatalog({ groupType: 'anthropic' }).data
+  assert.ok(anthropic.length > 0 && !anthropic.some(isGpt))
+  assert.equal(gatewayModelCatalog({ groupType: 'all' }).data.length, all.length)
 })

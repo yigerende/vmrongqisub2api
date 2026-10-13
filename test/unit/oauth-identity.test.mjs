@@ -11,6 +11,10 @@ import { normalizeOauth } from '../../src/lib/oauth/oauth-credentials.mjs'
 import { liveOauthToSetupToken } from '../../src/lib/oauth/credential-mode.mjs'
 import { createImportCommit } from '../../src/lib/oauth/import-commit.mjs'
 
+test('bootstrap URL uses claude-code entrypoint without vscode fields', () => {
+  assert.match(CLAUDE_CLI_BOOTSTRAP_URL, /\/api\/claude_cli\/bootstrap\?entrypoint=claude-code&model=claude-opus-5-5$/)
+  assert.doesNotMatch(CLAUDE_CLI_BOOTSTRAP_URL, /vscode/)
+})
 test('flattenOauthIdentity reads oauth_account bootstrap shape', () => {
   assert.deepEqual(
     flattenOauthIdentity({

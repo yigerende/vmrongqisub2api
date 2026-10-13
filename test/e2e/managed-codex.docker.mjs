@@ -10,7 +10,9 @@ import net from 'node:net'
 import { execFileSync } from 'node:child_process'
 import { openDatabase, closeDatabase } from '../../src/lib/db/database.mjs'
 import { createManagedCodex, importManagedCodex, handleManagedCodex } from '../../src/lib/admin/managed-codex.mjs'
-import { getVm, patchVmRecord } from '../../src/lib/vm/vm-registry.mjs'
+import { getVm, patchVmRecord, summarizeVm } from '../../src/lib/vm/vm-registry.mjs'
+import { changeVmQualitySchedule } from '../../src/lib/admin/vm-quality-schedule.mjs'
+import { invalidateReadCache } from '../../src/lib/vm/vm-file.mjs'
 import { inspectManagedContainer, ensureManagedKernel, managedExec } from '../../src/lib/vm/codex-container.mjs'
 import { readCodexAccounts, upsertCodexAccount } from '../../src/lib/vm/codex-slot.mjs'
 import { imageForKernel } from '../../src/lib/vm/os-catalog.mjs'
@@ -177,6 +179,24 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.equal(afterRejectedQuota.pid, kernelBeforeQuota.pid)
     assert.equal(afterRejectedQuota.revision, kernelBeforeQuota.revision)
     assert.equal(afterRejectedQuota.running, true)
+    const qualityLease = tryAcquireOpenAISlot(vm.id)
+    assert.ok(qualityLease)
+    try {
+      const paused = changeVmQualitySchedule(root, summarizeVm(getVm(root, vm.id), root), false)
+      assert.equal(paused.schedulable, false)
+      assert.equal(openAIRuntimeSignals(vm.id).inFlight, 1, 'quality pause leaves existing requests running')
+      assert.equal((await inspectManagedContainer(vm)).id, a.container.id)
+      const pausedKernel = JSON.parse(fs.readFileSync(statePath, 'utf8'))
+      assert.equal(pausedKernel.pid, kernelBeforeQuota.pid)
+      assert.equal(pausedKernel.revision, kernelBeforeQuota.revision)
+      assert.equal(pausedKernel.running, true)
+      // Pinned diagnostics can still reach this same guest for recovery.
+      assert.equal((await ensureManagedKernel(managedExec(root, getVm(root, vm.id)))).ok, true)
+      assert.equal(changeVmQualitySchedule(root, summarizeVm(getVm(root, vm.id), root), true).schedulable, true)
+      assert.equal(openAIRuntimeSignals(vm.id).inFlight, 1)
+    } finally {
+      qualityLease.release()
+    }
     const afterProbe = tryAcquireOpenAISlot(vm.id)
     assert.ok(afterProbe, 'a rejected quota probe must not disable scheduling')
     afterProbe.release()
@@ -226,7 +246,15 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
       assert.equal((await call('DELETE', '')).status, 409, 'must refuse an unrelated container')
       assert.equal(proxyPool.getProxyForVm(vm.id).id, 'px-local', 'failed deletion must keep the binding')
       patchVmRecord(root, vm.id, { container_name: originalName })
+      const recordPath = path.join(root, 'vms', `${vm.id}.json`)
+      const credentialPath = path.join(root, 'vms', vm.id, 'codex-credentials.json')
+      assert.equal(getVm(root, vm.id).id, vm.id)
+      assert.equal(readCodexAccounts(root, vm.id)[0].refresh_token, 'new-rt')
       assert.equal((await call('DELETE', '')).status, 200, 'delete must not wait for active requests')
+      assert.equal(invalidateReadCache(recordPath), false, 'deletion must evict the slot record')
+      assert.equal(invalidateReadCache(credentialPath), false, 'deletion must evict cached OAuth credentials')
+      assert.equal(readCodexAccounts(root, vm.id).length, 0)
+      assert.equal(readCodexAccounts(root, other.id)[0].refresh_token, credential.refresh_token)
       assert.equal(proxyPool.getProxyForVm(vm.id), null, 'successful deletion releases the local binding')
       assert.equal(proxyPool.getProxyForVm(other.id).id, chosenProxy, 'other slots retain their bindings')
       assert.equal(openAIRuntimeSignals(vm.id).inFlight, 1, 'the held request has not drained')

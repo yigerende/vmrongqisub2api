@@ -268,6 +268,50 @@ export function isDownstreamCommitEvent(event) {
   return t.startsWith('response.output_')
 }
 
+/**
+ * Timing starts at generated content, independently of downstream commitment.
+ * A generated tool name is first output: name-only tools often never send a
+ * parameter delta. Connection metadata, empty blocks, and trailers are not TTFT.
+ * Shared Claude/Codex kernel stream path only; API transport still stamps the
+ * first `data:` line in api-protocol.mjs.
+ */
+function hasGeneratedContent(block) {
+  if (!block || typeof block !== 'object') return false
+  const nonempty = (value) => typeof value === 'string' && value.length > 0
+  if ([block.text, block.thinking, block.refusal].some(nonempty)) return true
+  if (block.type === 'redacted_thinking') return nonempty(block.data)
+  return (
+    (block.type === 'function_call' ||
+      block.type === 'custom_tool_call' ||
+      String(block.type || '').endsWith('tool_use')) &&
+    (nonempty(block.name) || nonempty(block.arguments) || nonempty(block.input))
+  )
+}
+
+function isFirstTokenEvent(event) {
+  if (!event || typeof event !== 'object') return false
+  const type = String(event.type || '')
+  if (type === 'content_block_delta') {
+    const delta = event.delta || {}
+    return [delta.text, delta.thinking, delta.partial_json, delta.refusal].some(
+      (value) => typeof value === 'string' && value.length > 0,
+    )
+  }
+  if (type === 'content_block_start') return hasGeneratedContent(event.content_block)
+  if (type.startsWith('response.') && type.endsWith('.delta')) {
+    return typeof event.delta === 'string' && event.delta.length > 0
+  }
+  if (type === 'response.content_part.added' || type === 'response.content_part.done')
+    return hasGeneratedContent(event.part)
+  if (type === 'response.output_item.added' || type === 'response.output_item.done') {
+    return (
+      hasGeneratedContent(event.item) ||
+      (Array.isArray(event.item?.content) && event.item.content.some(hasGeneratedContent))
+    )
+  }
+  return false
+}
+
 /** Anthropic SSE: message_start.message.usage + message_delta.usage. OpenAI Responses: response.usage. */
 export function usageFromSseEvent(event) {
   if (!event || typeof event !== 'object') return null
@@ -615,7 +659,10 @@ export async function streamGoWorker({
     let mockTtftMs = null
     await emitMockSse(async (line) => {
       if (line.startsWith('data:')) {
-        if (mockTtftMs == null) mockTtftMs = Date.now() - mockStartedAt
+        try {
+          if (mockTtftMs == null && isFirstTokenEvent(JSON.parse(line.slice(5))))
+            mockTtftMs = Date.now() - mockStartedAt
+        } catch {}
         if (typeof onCommit === 'function') onCommit()
       }
       if (onEvent) await onEvent(line)
@@ -629,9 +676,11 @@ export async function streamGoWorker({
       model: payload.body?.model || null,
       stopReason: payload.body?.stop_reason || null,
       ttftMs: mockTtftMs,
+      firstTokenAt: mockTtftMs == null ? null : mockStartedAt + mockTtftMs,
     }
   }
   let committed = false
+  // Hop-relative TTFT. firstTokenAt is epoch ms so request logs subtract ingress t0.
   const startedAt = Date.now()
   let ttftMs = null
   const requestId = randomUUID()
@@ -712,6 +761,7 @@ export async function streamGoWorker({
     }
     const observeSseEvent = (event) => {
       if (!event) return event
+      if (ttftMs == null && isFirstTokenEvent(event)) ttftMs = Date.now() - startedAt
       if (event.type === 'response_headers' && event.headers && typeof event.headers === 'object') {
         sseRateHeaders = { ...sseRateHeaders, ...event.headers }
       }
@@ -762,7 +812,6 @@ export async function streamGoWorker({
               const event = observeSseEvent(takeSseEvent())
               if (isDownstreamCommitEvent(event)) await flushCommit()
             }
-            if (ttftMs == null) ttftMs = Date.now() - startedAt
           } else if (line === '') {
             if (dataBuf) {
               const event = takeSseEvent()
@@ -808,6 +857,7 @@ export async function streamGoWorker({
         stopReason,
         sawMessageStop,
         ttftMs,
+        firstTokenAt: ttftMs == null ? null : startedAt + ttftMs,
         committed,
         terminalState,
         transportError: false,
@@ -820,6 +870,7 @@ export async function streamGoWorker({
       return clientCancelledResult({
         via: 'go-worker-stream',
         ttftMs,
+        firstTokenAt: ttftMs == null ? null : startedAt + ttftMs,
         committed,
       })
     }
@@ -837,6 +888,7 @@ export async function streamGoWorker({
       },
       headers: {},
       ttftMs,
+      firstTokenAt: ttftMs == null ? null : startedAt + ttftMs,
       committed,
       terminalState: committed ? 'incomplete' : 'transport_error',
       transportError: true,

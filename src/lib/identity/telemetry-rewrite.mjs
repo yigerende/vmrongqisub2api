@@ -5,7 +5,7 @@
  * Node never dials Anthropic; rewritten bodies are for the Go sidecar
  * and for stripping caller identity if a client hits these paths.
  */
-import { buildFullEnvJson, buildProcessJson, DEFAULT_PROCESS_RANGES } from './telemetry-env.mjs'
+import { buildFullEnvJson, buildProcessJson, DEFAULT_PROCESS_RANGES, officialDeviceID } from './telemetry-env.mjs'
 
 export function isTelemetryPath(pathname = '') {
   const path = String(pathname || '')
@@ -74,13 +74,17 @@ function rewriteUserAttributesJson(raw, identity) {
 
 function rewriteIdentityFields(obj, identity) {
   if (!obj) return
-  if ('device_id' in obj && identity.device_id) obj.device_id = identity.device_id
+  const device = officialDeviceID(identity.user_id, identity.device_id)
+  if (device && 'device_id' in obj) obj.device_id = device
   if ('email' in obj && identity.email) obj.email = identity.email
   if ('account_uuid' in obj && identity.account_uuid) obj.account_uuid = identity.account_uuid
   if ('organization_uuid' in obj) {
     if (identity.org_uuid) obj.organization_uuid = identity.org_uuid
     else delete obj.organization_uuid
   }
+  delete obj.betas
+  delete obj.model
+  delete obj.additional_metadata
   delete obj.baseUrl
   delete obj.base_url
   delete obj.gateway
@@ -100,9 +104,9 @@ export function rewriteEventBatch(body, identity = {}) {
     }
     if (data.process != null) data.process = rewriteProcess(data.process, identity.process)
     if (event.process != null && event !== data) event.process = rewriteProcess(event.process, identity.process)
-    if (typeof data.additional_metadata === 'string' && data.additional_metadata) {
-      data.additional_metadata = rewriteUserAttributesJson(data.additional_metadata, identity)
-    }
+    delete data.additional_metadata
+    delete data.betas
+    delete data.model
     if (typeof data.user_attributes === 'string') {
       data.user_attributes = rewriteUserAttributesJson(data.user_attributes, identity)
     }

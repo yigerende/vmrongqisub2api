@@ -61,7 +61,6 @@ export const DEFAULT_DISTILL_RULES = {
     'systematic long thinking process',
     'as an internal monologue',
     'Please reason step by step, and put your final answer within \\boxed{}',
-    'Respond in the following format: <think>',
     ...HARVEST_NEEDLES,
   ],
   patterns: [...HARD_DISTILL_PATTERNS],
@@ -231,11 +230,16 @@ function matchFingerprints(text, fingerprints) {
   return ''
 }
 
-/** Pasted assistant transcripts contain these. They are not a distill template. */
-const BARE_THINK_NEEDLES = new Set(['<think>', '</think>'])
+/**
+ * Not a distill template. Bare tags show up in pasted transcripts. The
+ * "respond in this format" line is a normal client system prompt (NewAPI and
+ * other relays forward it on Go-http-client, so skip_official does not apply).
+ * Saved configs lose these on load; turn distill off to disable the rest.
+ */
+const DROPPED_NEEDLES = new Set(['<think>', '</think>', 'respond in the following format: <think>'])
 
 function dropBareThinkNeedles(needles) {
-  return needles.filter((item) => !BARE_THINK_NEEDLES.has(String(item).trim().toLowerCase()))
+  return needles.filter((item) => !DROPPED_NEEDLES.has(String(item).trim().toLowerCase()))
 }
 
 function matchNeedles(text, needles) {

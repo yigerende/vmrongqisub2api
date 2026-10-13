@@ -45,6 +45,7 @@ async function harness(t, layout = 'zero', cliPath = cli) {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'vm2api-automode-e2e-'))
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }))
   const captured = []
+  const capturedHeaders = []
   const pending = []
   const upstream = http.createServer(async (req, res) => {
     let raw = ''
@@ -52,6 +53,7 @@ async function harness(t, layout = 'zero', cliPath = cli) {
     if (!req.url.startsWith('/v1/messages')) return res.writeHead(404).end()
     const body = JSON.parse(raw)
     captured.push(body)
+    capturedHeaders.push({ ...req.headers })
     const marker = JSON.stringify(body.messages)
     const errorStatus = /CASE_HTTP_(\d+)/.exec(marker)?.[1]
     if (errorStatus) {
@@ -371,6 +373,7 @@ async function harness(t, layout = 'zero', cliPath = cli) {
   }
   return {
     captured,
+    capturedHeaders,
     health,
     send,
     logs,
@@ -611,6 +614,85 @@ test('classifier terminal/error/cancel/concurrency boundaries through actual ELF
   assert.equal(unsupported.status, 400, unsupported.text)
   assert.equal(JSON.parse(unsupported.text).error.code, 'classifier_runtime_unsupported')
   assert.equal(h.captured.length, count)
+})
+
+test('actual kernel+CLI ELF keeps per-message effort and top-level high', { timeout: 30000 }, async (t) => {
+  const h = await harness(t)
+  const beta = 'mid-conversation-output-config-2026-07-01'
+  const hasBeta = (wire, headers) =>
+    (Array.isArray(wire?.betas) && wire.betas.includes(beta)) ||
+    String(headers?.['anthropic-beta'] || '').includes(beta)
+  const efforts = (wire) =>
+    (wire.messages || [])
+      .filter((message) => message?.output_config?.effort)
+      .map((message) => message.output_config.effort)
+  const roles = (wire) => (wire.messages || []).map((message) => message.role)
+  const cases = [
+    {
+      name: 'control_after_new_user',
+      turns: [
+        { role: 'user', content: 'Reply OK.' },
+        { role: 'assistant', content: 'OK.' },
+        { role: 'user', content: 'Reply OK again.' },
+        { role: 'system', content: [], output_config: { effort: 'medium' } },
+      ],
+      wantEfforts: ['medium'],
+    },
+    {
+      name: 'control_before_new_user',
+      turns: [
+        { role: 'user', content: 'Reply OK.' },
+        { role: 'assistant', content: 'OK.' },
+        { role: 'system', content: [], output_config: { effort: 'medium' } },
+        { role: 'user', content: 'Reply OK again.' },
+      ],
+      wantEfforts: ['medium'],
+    },
+    {
+      name: 'historical',
+      turns: [
+        { role: 'user', content: 'one' },
+        { role: 'system', content: [], output_config: { effort: 'low' } },
+        { role: 'assistant', content: 'ok' },
+        { role: 'user', content: 'two' },
+      ],
+      wantEfforts: ['low'],
+    },
+    {
+      name: 'repeated',
+      turns: [
+        { role: 'user', content: 'one' },
+        { role: 'system', content: [], output_config: { effort: 'low' } },
+        { role: 'assistant', content: 'ok' },
+        { role: 'user', content: 'two' },
+        { role: 'system', content: [], output_config: { effort: 'max' } },
+        { role: 'assistant', content: 'ok2' },
+        { role: 'user', content: 'three' },
+        { role: 'system', content: [], output_config: { effort: 'medium' } },
+      ],
+      wantEfforts: ['low', 'max', 'medium'],
+    },
+  ]
+  for (const item of cases) {
+    const result = await h.send({
+      model: 'claude-opus-5-5',
+      max_tokens: 64,
+      thinking: { type: 'adaptive' },
+      output_config: { effort: 'high' },
+      system: [{ type: 'text', text: 'Ordinary caller prompt' }],
+      messages: item.turns,
+    })
+    assert.equal(result.status, 200, `${item.name}: ${result.text}`)
+    const wire = h.captured.at(-1)
+    const headers = h.capturedHeaders.at(-1)
+    assert.equal(wire.output_config.effort, 'high', item.name)
+    assert.deepEqual(roles(wire), roles({ messages: item.turns }), item.name)
+    assert.deepEqual(efforts(wire), item.wantEfforts, `${item.name} ${JSON.stringify(roles(wire))}`)
+    assert.ok(
+      hasBeta(wire, headers),
+      `${item.name} missing ${beta} body.betas=${JSON.stringify(wire.betas)} header=${headers?.['anthropic-beta']}`,
+    )
+  }
 })
 
 test('new kernel refuses classifier context against actual old CLI', {

@@ -23,8 +23,8 @@ export function SignOutDialog({ open, onOpenChange }: SignOutDialogProps) {
       handleConfirm={() => {
         signOut()
         navigate({
-          to: '/login',
-          search: { redirect: undefined },
+          to: '/welcome',
+          search: {},
           replace: true,
         })
       }}

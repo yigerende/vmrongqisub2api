@@ -32,9 +32,6 @@ const (
 	defaultTerminal    = "unknown"
 	defaultPlatform    = "linux"
 	officialCLIVersion = "2.1.293"
-	// Claude Code 2.1.293 official main Messages order, no context-1m. Same 13 betas as 2.1.281.
-	// Lockstep with fullClaudeCodeMimicryBetas() in claude-code-betas.mjs.
-	officialMainBetas = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,thinking-token-count-2026-05-13,context-management-2025-06-27,prompt-caching-scope-2026-01-05,mid-conversation-system-2026-04-07,advanced-tool-use-2025-11-20,mid-conversation-system-clear-at-2026-08-21,effort-2025-11-24,thinking-binding-controls-2026-08-01,extended-cache-ttl-2025-04-11,cache-diagnosis-2026-04-07"
 )
 
 func InitEvent(id Identity, now time.Time) Event {
@@ -45,7 +42,7 @@ func SuccessEvent(id Identity, now time.Time, uptimeSecs float64, model string) 
 	return namedEvent(id, eventTenguSuccess, now, uptimeSecs, model)
 }
 
-func namedEvent(id Identity, name string, now time.Time, uptimeSecs float64, model string) Event {
+func namedEvent(id Identity, name string, now time.Time, uptimeSecs float64, _ string) Event {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
@@ -53,26 +50,18 @@ func namedEvent(id Identity, name string, now time.Time, uptimeSecs float64, mod
 	if entrypoint == "" {
 		entrypoint = "cli"
 	}
-	betas := strings.TrimSpace(id.Betas)
-	if betas == "" {
-		betas = officialMainBetas
-	}
 	data := map[string]any{
-		"event_name":          name,
-		"event_id":            newEventID(),
-		"client_timestamp":    now.UTC().Format("2006-01-02T15:04:05.000Z"),
-		"entrypoint":          entrypoint,
-		"is_interactive":      name != eventTenguInit,
-		"client_type":         defaultClientType,
-		"user_type":           defaultUserType,
-		"betas":               betas,
-		"agent_sdk_version":   "",
-		"additional_metadata": "",
+		"event_name":       name,
+		"event_id":         newEventID(),
+		"client_timestamp": now.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"entrypoint":       entrypoint,
+		"is_interactive":   name != eventTenguInit,
+		"client_type":      defaultClientType,
+		"user_type":        defaultUserType,
 	}
-	put(data, "device_id", id.DeviceID)
+	put(data, "device_id", telemetryDevice(id))
 	put(data, "session_id", id.SessionID)
 	put(data, "email", id.Email)
-	put(data, "model", model)
 	if auth := authBlock(id); len(auth) > 0 {
 		data["auth"] = auth
 	}
@@ -84,9 +73,12 @@ func namedEvent(id Identity, name string, now time.Time, uptimeSecs float64, mod
 }
 
 func GrowthbookEval(id Identity) map[string]any {
-	device := strings.TrimSpace(id.UserID)
+	device := telemetryDevice(id)
 	if device == "" {
-		device = strings.TrimSpace(id.DeviceID)
+		device = strings.TrimSpace(id.UserID)
+		if device == "" {
+			device = strings.TrimSpace(id.DeviceID)
+		}
 	}
 	session := strings.TrimSpace(id.SessionID)
 	if session == "" {
@@ -100,20 +92,28 @@ func GrowthbookEval(id Identity) map[string]any {
 	if platform == "" {
 		platform = defaultPlatform
 	}
+	entrypoint := strings.TrimSpace(id.Entrypoint)
+	if entrypoint == "" {
+		entrypoint = "cli"
+	}
 	attrs := map[string]any{
 		"id":         device,
 		"sessionId":  session,
 		"deviceID":   device,
 		"platform":   platform,
 		"appVersion": version,
+		"userType":   defaultUserType,
+		"entrypoint": entrypoint,
 	}
 	put(attrs, "email", id.Email)
 	put(attrs, "accountUUID", id.AccountUUID)
 	put(attrs, "organizationUUID", id.OrgUUID)
 	put(attrs, "subscriptionType", id.SubscriptionType)
 	return map[string]any{
-		"attributes":     attrs,
-		"forcedFeatures": map[string]any{},
+		"attributes":       attrs,
+		"forcedVariations": map[string]any{},
+		"forcedFeatures":   []any{},
+		"url":              "",
 	}
 }
 
@@ -126,11 +126,7 @@ func authBlock(id Identity) map[string]any {
 
 func envBlock(id Identity) map[string]any {
 	if len(id.Env) > 0 {
-		out := make(map[string]any, len(id.Env))
-		for key, value := range id.Env {
-			out[key] = value
-		}
-		return out
+		return sanitizeEnv(id.Env)
 	}
 	platform := strings.TrimSpace(id.Platform)
 	if platform == "" {
@@ -152,15 +148,22 @@ func envBlock(id Identity) map[string]any {
 	if platform != "linux" {
 		deploy = "unknown-" + platform
 	}
-	return map[string]any{
+	vcs := strings.TrimSpace(id.VCS)
+	if vcs == "" {
+		vcs = "git"
+	}
+	runtimes := strings.TrimSpace(id.Runtimes)
+	if runtimes == "" {
+		runtimes = "node"
+	}
+	out := map[string]any{
 		"platform":                          platform,
 		"platform_raw":                      raw,
 		"arch":                              strings.TrimSpace(id.Arch),
-		"node_version":                      strings.TrimSpace(id.NodeVersion),
 		"terminal":                          terminal,
+		"shell":                             telemetryShell(id.Shell),
 		"package_managers":                  strings.TrimSpace(id.PackageManagers),
-		"runtimes":                          "node",
-		"is_running_with_bun":               false,
+		"runtimes":                          runtimes,
 		"is_ci":                             false,
 		"is_claubbit":                       false,
 		"is_claude_code_remote":             false,
@@ -171,9 +174,8 @@ func envBlock(id Identity) map[string]any {
 		"is_claude_ai_auth":                 strings.TrimSpace(id.AccountUUID) != "",
 		"version":                           version,
 		"version_base":                      versionBase(version),
-		"build_time":                        "",
 		"deployment_environment":            deploy,
-		"vcs":                               "git",
+		"vcs":                               vcs,
 		"github_event_name":                 "",
 		"github_actions_runner_environment": "",
 		"github_actions_runner_os":          "",
@@ -187,6 +189,75 @@ func envBlock(id Identity) map[string]any {
 		"linux_distro_id":                   strings.TrimSpace(id.LinuxDistroID),
 		"linux_distro_version":              strings.TrimSpace(id.LinuxDistroVersion),
 		"linux_kernel":                      strings.TrimSpace(id.LinuxKernel),
+	}
+	if bt := strings.TrimSpace(id.BuildTime); bt != "" {
+		out["build_time"] = bt
+	}
+	return out
+}
+func sanitizeEnv(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in)+3)
+	for key, value := range in {
+		switch key {
+		case "node_version", "is_running_with_bun", "betas":
+			continue
+		default:
+			out[key] = value
+		}
+	}
+	if shell, _ := out["shell"].(string); strings.TrimSpace(shell) == "" {
+		out["shell"] = "bash"
+	} else {
+		out["shell"] = telemetryShell(shell)
+	}
+	if vcs, _ := out["vcs"].(string); strings.TrimSpace(vcs) == "" {
+		out["vcs"] = "git"
+	}
+	if runtimes, _ := out["runtimes"].(string); strings.TrimSpace(runtimes) == "" {
+		out["runtimes"] = "node"
+	}
+	if bt, ok := out["build_time"].(string); !ok || strings.TrimSpace(bt) == "" {
+		delete(out, "build_time")
+	}
+	return out
+}
+
+func telemetryDevice(id Identity) string {
+	if device := hex64(id.UserID); device != "" {
+		return device
+	}
+	return hex64(id.DeviceID)
+}
+
+func hex64(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if len(value) != 64 {
+		return ""
+	}
+	for _, c := range value {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return ""
+		}
+	}
+	return value
+}
+
+func telemetryShell(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "bash"
+	}
+	value = strings.ReplaceAll(value, "\\", "/")
+	if i := strings.LastIndex(value, "/"); i >= 0 {
+		value = value[i+1:]
+	}
+	value = strings.TrimSuffix(strings.ToLower(value), ".exe")
+	switch value {
+	case "zsh", "bash", "fish", "sh", "dash", "ash", "ksh", "tcsh", "csh",
+		"nu", "nushell", "pwsh", "powershell", "cmd", "elvish", "xonsh", "ion":
+		return value
+	default:
+		return "other"
 	}
 }
 

@@ -12,7 +12,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { dashboardQueryOptions } from '@/features/overview/queries'
-import { vmQueryOptions } from '@/features/vm/queries'
+import { vmQueryOptions, vmsListQueryOptions } from '@/features/vm/queries'
 
 function formatRestrictionUntil(until: number | null | undefined): string {
   const ms = expiresAtToMs(until)
@@ -59,8 +59,11 @@ export function SchedulableSwitch({
     onMutate: (next) => setOptimistic(next),
     onSuccess: async (_data, next) => {
       toast.success(next ? '已开启调度' : '已关闭调度')
-      await qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey })
-      await qc.invalidateQueries({ queryKey: vmQueryOptions(vmId).queryKey })
+      await Promise.all([
+        qc.invalidateQueries({ queryKey: vmsListQueryOptions().queryKey }),
+        qc.invalidateQueries({ queryKey: dashboardQueryOptions().queryKey }),
+        qc.invalidateQueries({ queryKey: vmQueryOptions(vmId).queryKey }),
+      ])
     },
     onError: (error: Error) => {
       setOptimistic(null)

@@ -485,6 +485,27 @@ test('a real Claude Code body behind a rewritten UA is claimed', () => {
   )
 })
 
+test('a relay that keeps the billing block is claimed even without user_id', () => {
+  assert.equal(
+    isProxiedOfficialClaudeCode(
+      {
+        model: 'claude-opus-5-5',
+        system: [
+          {
+            type: 'text',
+            text: 'x-anthropic-billing-header: cc_version=2.1.280.096; cc_entrypoint=cli; cch=58481;',
+          },
+          { type: 'text', text: "You are Claude Code, Anthropic's official CLI for Claude." },
+          { type: 'text', text: '<project-context>\n<workstation>\n- OS: linux\n' },
+        ],
+        messages: [{ role: 'user', content: 'hi' }],
+      },
+      { 'user-agent': 'Go-http-client/1.1', 'anthropic-beta': 'claude-code-20250219' },
+    ),
+    true,
+  )
+})
+
 /** The shape 95% of live third-party traffic actually has: a fictional-chat
     system prompt as a bare string, and no metadata at all. */
 test('a fictional-chat third-party body is never claimed', () => {

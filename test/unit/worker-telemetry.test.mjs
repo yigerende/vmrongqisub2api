@@ -43,18 +43,39 @@ test('sidecar stays off without official identity', () => {
 test('sidecar enables with official ~/.claude.json IDs', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-tel-'))
   writeOfficialHome(root, 'vm-02')
+  fs.writeFileSync(
+    path.join(root, 'vms', 'vm-02', 'cli-home', '.claude', 'kin-official-bootstrap.json'),
+    JSON.stringify({ status: 'ok', finished_at: '2026-10-07T06:36:42.123Z' }),
+  )
   const vm = {
     id: 'vm-02',
     seed_policy: { telemetry_disabled: false },
-    fingerprint: { device_id: 'd2', session_id: 's2' },
+    fingerprint: { device_id: 'd2', session_id: 's2', shell: '/bin/zsh', vcs: 'git', runtimes: 'bun,node' },
   }
   const out = buildWorkerTelemetry(vm, root)
   assert.equal(out.enabled, true)
-  assert.equal(out.identity.device_id, MACHINE)
+  assert.equal(out.identity.device_id, USER)
   assert.equal(out.identity.user_id, USER)
   assert.equal(out.identity.source, 'official-cc-init')
-  assert.doesNotMatch(out.betas, /context-1m/)
-  assert.equal(out.identity.betas, out.betas)
+  assert.equal(out.betas, undefined)
+  assert.equal(out.identity.betas, undefined)
+  assert.equal(out.identity.env.shell, 'zsh')
+  assert.equal(out.identity.env.vcs, 'git')
+  assert.equal(out.identity.env.runtimes, 'bun,node')
+  assert.equal(out.identity.env.build_time, '2026-10-07T06:36:42Z')
+  assert.equal(out.identity.env.node_version, undefined)
+  assert.equal(out.identity.env.is_running_with_bun, undefined)
+  fs.rmSync(root, { recursive: true, force: true })
+})
+
+test('machine id alone is not the 64-hex device id', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kin-tel-'))
+  const home = path.join(root, 'vms', 'vm-02', 'cli-home')
+  fs.mkdirSync(path.join(home, '.claude'), { recursive: true })
+  fs.writeFileSync(path.join(home, '.claude.json'), JSON.stringify({ machineID: MACHINE, userID: 'not-64-hex' }))
+  const out = buildWorkerTelemetry({ id: 'vm-02', seed_policy: { telemetry_disabled: false } }, root)
+  assert.equal(out.enabled, false)
+  assert.equal(out.reason, 'waiting_official_identity')
   fs.rmSync(root, { recursive: true, force: true })
 })
 

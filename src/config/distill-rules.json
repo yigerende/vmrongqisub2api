@@ -28,8 +28,7 @@
     "MUST distill reusable",
     "MUST extract durable memory",
     "durable rollout knowledge",
-    "You MUST extract durable memory now",
-    "Respond in the following format: <think>"
+    "You MUST extract durable memory now"
   ],
   "patterns": [
     "\\b(?:knowledge|model|teacher|student)\\s+distill(?:ation|ing)?\\b",

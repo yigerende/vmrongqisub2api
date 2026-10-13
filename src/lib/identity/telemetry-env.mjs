@@ -1,12 +1,10 @@
 /**
- * Claude Code 1P env / event / GrowthBook payloads.
- * Schema matches cc-bridge build_full_env_json + build_event_batch +
- * build_growthbook_eval. Values come from official ~/.claude.json init
- * and guest collect — never random darwin/win32 presets.
+ * Claude Code 2.1.293 1P env / event / GrowthBook payloads.
+ * device_id is the install userID (64 hex). Betas, node_version,
+ * is_running_with_bun, model, and additional_metadata are not sent.
  */
 import crypto from 'node:crypto'
 import { OFFICIAL_CLI_VERSION } from './vm-identity.mjs'
-import { DEFAULT_BETA_HEADER } from '../protocol/claude-code-betas.mjs'
 
 export const GROWTHBOOK_CLIENT_KEY = 'sdk-zAZezfDKGoZuXXKe'
 export const TELEMETRY_SESSION_TTL_MS = 10 * 60 * 1000
@@ -26,11 +24,10 @@ export const FULL_ENV_KEYS = Object.freeze([
   'platform',
   'platform_raw',
   'arch',
-  'node_version',
   'terminal',
+  'shell',
   'package_managers',
   'runtimes',
-  'is_running_with_bun',
   'is_ci',
   'is_claubbit',
   'is_claude_code_remote',
@@ -62,6 +59,48 @@ export const FULL_ENV_KEYS = Object.freeze([
 function str(v) {
   return v == null ? '' : String(v)
 }
+const SHELL_NAMES = new Set([
+  'zsh',
+  'bash',
+  'fish',
+  'sh',
+  'dash',
+  'ash',
+  'ksh',
+  'tcsh',
+  'csh',
+  'nu',
+  'nushell',
+  'pwsh',
+  'powershell',
+  'cmd',
+  'elvish',
+  'xonsh',
+  'ion',
+])
+
+const HEX64 = /^[0-9a-f]{64}$/
+
+/** 2.1.293 bUn(). Empty VM shell is bash; source would say "none". */
+export function telemetryShell(value) {
+  const raw = str(value).trim()
+  if (!raw) return 'bash'
+  const base = raw
+    .split(/[/\\]/)
+    .pop()
+    .toLowerCase()
+    .replace(/\.exe$/, '')
+  return SHELL_NAMES.has(base) ? base : 'other'
+}
+
+/** Official event device_id is ~/.claude.json userID, 32 bytes of hex. */
+export function officialDeviceID(...values) {
+  for (const value of values) {
+    const id = str(value).trim().toLowerCase()
+    if (HEX64.test(id)) return id
+  }
+  return ''
+}
 
 function versionBase(version) {
   const raw = str(version)
@@ -91,15 +130,14 @@ export function distroVersionFromPretty(pretty) {
 export function buildFullEnvJson(id = {}) {
   const version = str(id.cli_version || id.version || OFFICIAL_CLI_VERSION)
   const platform = str(id.platform || 'linux')
-  return {
+  const env = {
     platform,
     platform_raw: str(id.platform_raw || platform),
     arch: str(id.arch || 'x64'),
-    node_version: str(id.node_version || 'v26.3.0'),
     terminal: str(id.terminal || 'unknown'),
+    shell: telemetryShell(id.shell),
     package_managers: str(id.package_managers || ''),
-    runtimes: str(id.runtimes || (id.node_version ? 'node' : 'node')),
-    is_running_with_bun: false,
+    runtimes: str(id.runtimes) || 'node',
     is_ci: false,
     is_claubbit: false,
     is_claude_code_remote: false,
@@ -110,9 +148,8 @@ export function buildFullEnvJson(id = {}) {
     is_claude_ai_auth: !!(id.account_uuid || id.is_claude_ai_auth),
     version,
     version_base: str(id.version_base || versionBase(version)),
-    build_time: str(id.build_time || ''),
     deployment_environment: str(id.deployment_environment || (platform === 'linux' ? 'unknown-linux' : '')),
-    vcs: str(id.vcs || 'git'),
+    vcs: str(id.vcs) || 'git',
     github_event_name: '',
     github_actions_runner_environment: '',
     github_actions_runner_os: '',
@@ -127,6 +164,9 @@ export function buildFullEnvJson(id = {}) {
     linux_distro_version: str(id.linux_distro_version || ''),
     linux_kernel: str(id.linux_kernel || ''),
   }
+  const buildTime = str(id.build_time).trim()
+  if (buildTime) env.build_time = buildTime
+  return env
 }
 
 export function buildProcessJson(proc = DEFAULT_PROCESS_RANGES, uptimeSecs = 0) {
@@ -173,28 +213,15 @@ export function buildEventData(id = {}, opts = {}) {
     event_id: newId(),
     event_name: eventName,
     client_timestamp: jsIso(opts.now),
-    device_id: str(id.device_id),
     session_id: str(id.session_id || newId()),
-    model: str(opts.model || ''),
     user_type: 'external',
     is_interactive: eventName !== 'tengu_init',
     client_type: 'cli',
     entrypoint: str(id.entrypoint || 'cli'),
-    betas: str(id.betas || DEFAULT_BETA_HEADER),
-    agent_sdk_version: '',
-    swe_bench_run_id: '',
-    swe_bench_instance_id: '',
-    swe_bench_task_id: '',
-    agent_id: '',
-    parent_session_id: '',
-    agent_type: '',
-    team_name: '',
-    skill_name: '',
-    plugin_name: '',
-    marketplace_name: '',
-    additional_metadata: '',
     env: buildFullEnvJson(id),
   }
+  const device = officialDeviceID(id.user_id, id.device_id)
+  if (device) data.device_id = device
   if (id.email) data.email = id.email
   if (Object.keys(auth).length) data.auth = auth
   if (eventName !== 'tengu_init') {
@@ -215,19 +242,21 @@ export function buildEventBatch(id = {}, opts = {}) {
 }
 
 export function buildGrowthbookEval(id = {}) {
-  const device = str(id.user_id || id.device_id)
+  const device = officialDeviceID(id.user_id, id.device_id) || str(id.user_id || id.device_id)
   const attrs = {
     id: device,
     sessionId: str(id.session_id || newId()),
     deviceID: device,
     platform: str(id.platform || 'linux'),
-    appVersion: str(id.cli_version || OFFICIAL_CLI_VERSION),
+    appVersion: str(id.cli_version || id.version || OFFICIAL_CLI_VERSION),
+    userType: 'external',
+    entrypoint: str(id.entrypoint || 'cli'),
   }
   if (id.email) attrs.email = id.email
   if (id.account_uuid) attrs.accountUUID = id.account_uuid
   if (id.org_uuid || id.organization_uuid) attrs.organizationUUID = id.org_uuid || id.organization_uuid
   if (id.subscription_type) attrs.subscriptionType = id.subscription_type
-  return { attributes: attrs, forcedFeatures: {} }
+  return { attributes: attrs, forcedVariations: {}, forcedFeatures: [], url: '' }
 }
 
 export function telemetryCodeUa(version = OFFICIAL_CLI_VERSION) {

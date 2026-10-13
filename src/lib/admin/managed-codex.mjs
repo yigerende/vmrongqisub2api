@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
-import { atomicWriteJson, isValidVmId, withVmLock } from '../vm/vm-file.mjs'
+import { atomicWriteJson, invalidateVmSlotReadCache, isValidVmId, withVmLock } from '../vm/vm-file.mjs'
 import {
   getVm,
   listVms,
@@ -257,6 +257,7 @@ export async function handleManagedCodex({ req, res, url, cfg, routing, proxyPoo
         )
         proxyPool.unbindVm(id)
         fs.rmSync(path.join(root, 'vms', `${id}.json`), { force: true })
+        invalidateVmSlotReadCache(root, id)
       })
       return json(res, 200, { ok: true, data: { deleted: id } })
     }

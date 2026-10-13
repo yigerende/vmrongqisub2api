@@ -7,7 +7,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { validTimezone } from '../core/timezone.mjs'
 import { hasBoundExit } from './egress.mjs'
-import { atomicWriteJson } from './vm-file.mjs'
+import { atomicWriteJson, invalidateVmSlotReadCache } from './vm-file.mjs'
 import { defaultSeedPolicy } from '../protocol/seed-policy.mjs'
 import { writeSlotSeedFiles } from './slot-seed.mjs'
 import { manualScheduleLevelOf } from '../pool/credential-weight.mjs'
@@ -32,6 +32,7 @@ export function wipeSlotHome(projectRoot, id) {
   try {
     if (fs.existsSync(chat)) fs.unlinkSync(chat)
   } catch {}
+  invalidateVmSlotReadCache(projectRoot, id)
 }
 
 export function seedFreshCliHome(projectRoot, vm) {
