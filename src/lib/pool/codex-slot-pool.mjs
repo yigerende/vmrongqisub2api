@@ -4,6 +4,7 @@
  * quota/auth before any SSE byte is committed.
  */
 import { isCodexVm } from '../vm/vm-kind.mjs'
+import { managedCodex } from '../vm/runtime-kind.mjs'
 import { extraToCodexSnapshot, normalizeCodexLimits, codexQuotaPark } from '../protocol/codex-usage.mjs'
 import { isLeftoverQuotaScheduleOff, isQuotaWindowReason } from './availability.mjs'
 import { orderOpenAIAccounts } from './openai-account-selector.mjs'
@@ -17,7 +18,7 @@ const HARD_UNAVAILABLE = new Set(['dead', 'error', 'disabled'])
 
 export function isCodexSlotReady(vm) {
   if (!vm || !isCodexVm(vm)) return false
-  if (vm.execution_mode === 'docker_per_slot' && vm.status !== 'running') return false
+  if (managedCodex(vm) && vm.status !== 'running') return false
   if (proxyBlockedReason(vm.proxy)) return false
   if (vm.schedulable === false && !isLeftoverQuotaScheduleOff(vm)) return false
   if (!vm.has_token) return false
@@ -86,7 +87,7 @@ export function pickCodexSlots(vms, { pin = null, now = Date.now(), quotaPolicy 
   if (pin) {
     const vm = list.find((item) => item?.id === pin) || null
     if (!vm || !isCodexVm(vm)) return { error: 'platform_mismatch', pin, ids: [], ready: [], parked: [] }
-    if (vm.execution_mode === 'docker_per_slot' && (vm.status !== 'running' || !vm.has_token))
+    if (managedCodex(vm) && (vm.status !== 'running' || !vm.has_token))
       return { error: 'slot_unavailable', pin, ids: [], ready: [], parked: [] }
     const blocked = proxyBlockedReason(vm.proxy)
     if (blocked) return { error: blocked, pin, ids: [], ready: [], parked: [] }

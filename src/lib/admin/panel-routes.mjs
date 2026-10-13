@@ -1064,6 +1064,7 @@ export function createPanelHandler(ctx) {
           panel.ok({
             version: 1,
             docker_per_slot: true,
+            kvm_per_slot: true,
             account_container_names: true,
             delete_account: true,
             proxy_selection: true,
@@ -3136,7 +3137,7 @@ export function createPanelHandler(ctx) {
       // POST /api/panel/vms/create — configurable seed VM + pure Claude Code home
       if (req.method === 'POST' && p === '/api/panel/vms/create') {
         const body = await readBody(req, 32 * 1024)
-        if (body.execution_mode === 'docker_per_slot') {
+        if (managedCodex(body)) {
           if (panelIdentity(req).role !== 'admin')
             return json(res, 403, { ok: false, error: { code: 'admin_required' } })
           try {

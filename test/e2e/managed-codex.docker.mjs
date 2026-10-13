@@ -57,9 +57,11 @@ async function refusingSocks() {
   }
 }
 
-test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and deletion', {
+const kvm = process.env.KIN_MANAGED_RUNTIME === 'kvm'
+const guestOS = kvm ? process.env.KIN_KVM_TEST_OS || 'debian-12' : 'ubuntu-24.04'
+test(`real one-slot ${kvm ? 'KVM' : 'Docker'}: idempotency, guest kernel, reauth, ownership and deletion`, {
   skip: process.env.KIN_DOCKER_TEST !== '1',
-  timeout: 240000,
+  timeout: kvm ? 900000 : 240000,
 }, async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'space-docker-'))
   process.env.KIN_CODEX_KERNEL_BIN = path.resolve('bin/kin-codex-kernel')
@@ -73,10 +75,11 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assignment_id: `space-${crypto.randomBytes(24).toString('hex')}`,
     account_email: 'fixture+one@example.com',
     platform: 'openai',
-    runtime_type: 'docker',
-    execution_mode: 'docker_per_slot',
+    runtime_type: kvm ? 'kvm' : 'docker',
+    execution_mode: kvm ? 'kvm_per_slot' : 'docker_per_slot',
+    kernel: guestOS,
     proxy_id: 'px-local',
-    machine: { memory: '512m' },
+    machine: { memory: kvm ? '1g' : '512m', vcpus: 2, disk_gb: 20 },
   }
   let vm
   let other
@@ -99,7 +102,7 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     return out
   }
   try {
-    docker('run', '-d', '--name', sentinel, imageForKernel('ubuntu-24.04'), 'sleep', 'infinity')
+    docker('run', '-d', '--name', sentinel, kvm ? 'busybox:1.37' : imageForKernel('ubuntu-24.04'), 'sleep', '10000')
     const [a, b] = await Promise.all([create(input), create(input)])
     assert.equal(a.vm.id, b.vm.id)
     assert.equal(a.container.id, b.container.id)
@@ -108,7 +111,7 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.equal(vm.proxy.id, 'px-local')
     assert.equal(vm.proxy_cli_enabled, true)
     assert.deepEqual(proxyPool.snapshot().proxies.find((p) => p.id === 'px-local').bound_vm_ids, [vm.id])
-    patchVmRecord(root, vm.id, { status: 'creating', runtime: { type: 'docker' } })
+    patchVmRecord(root, vm.id, { status: 'creating', runtime: { type: kvm ? 'kvm' : 'docker' } })
     const recovered = await create(input)
     vm = getVm(root, vm.id)
     assert.equal(recovered.container.id, a.container.id, 'recover the existing container after an interrupted save')
@@ -123,12 +126,31 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     await importManagedCodex(root, vm, credential)
     const health = await ensureManagedKernel(managedExec(root, getVm(root, vm.id)))
     assert.equal(health.ok, true)
-    assert.match(docker('top', vm.container_name, '-eo', 'pid,args'), /kin-codex-kernel/)
+    const guest = (slot, ...argv) =>
+      docker('exec', slot.container_name, ...(kvm ? ['kin-guest-exec', '--'] : []), ...argv)
+    if (kvm) {
+      assert.doesNotMatch(
+        docker('top', vm.container_name, '-eo', 'pid,args'),
+        /kin-codex-kernel/,
+        'Codex must run inside QEMU, never on the runner',
+      )
+      assert.match(guest(vm, 'ps', '-eo', 'args'), /\/slot\/bin\/kin-codex-kernel/)
+      assert.equal(guest(vm, 'cat', '/sys/class/dmi/id/product_uuid').toLowerCase(), vm.machine.smbios.uuid)
+      const pinned = await create({
+        ...input,
+        runtime_type: 'docker',
+        execution_mode: 'docker_per_slot',
+        machine: { memory: '8g' },
+      })
+      assert.equal(pinned.container.id, a.container.id)
+      assert.equal(getVm(root, vm.id).machine.memory, '1g')
+      assert.equal(getVm(root, vm.id).runtime.type, 'kvm')
+    } else assert.match(docker('top', vm.container_name, '-eo', 'pid,args'), /kin-codex-kernel/)
     const info = JSON.parse(docker('inspect', vm.container_name))[0]
     assert.equal(info.HostConfig.Privileged, false)
     assert.equal(info.HostConfig.NetworkMode, 'bridge')
     assert.ok(!info.Mounts.some((m) => /docker.sock/.test(m.Source)))
-    assert.equal(docker('exec', vm.container_name, 'cat', '/etc/machine-id'), vm.fingerprint.guest_machine_id)
+    assert.equal(guest(vm, 'cat', '/etc/machine-id'), vm.fingerprint.guest_machine_id)
     assert.equal((await call('POST', 'schedulable', { schedulable: true })).status, 200)
     const statePath = path.join(root, 'vms', vm.id, 'run', 'container-state.json')
     const kernelBeforeQuota = JSON.parse(fs.readFileSync(statePath, 'utf8'))
@@ -224,6 +246,21 @@ test('real one-slot Docker: idempotency, guest kernel, reauth, ownership and del
     assert.notEqual(other.container_name, vm.container_name)
     assert.notEqual(other.fingerprint.device_id, vm.fingerprint.device_id)
     await importManagedCodex(root, other, credential)
+    if (kvm) {
+      assert.notEqual(guest(vm, 'cat', '/etc/machine-id'), guest(other, 'cat', '/etc/machine-id'))
+      assert.notEqual(
+        guest(vm, 'cat', '/proc/sys/kernel/random/boot_id'),
+        guest(other, 'cat', '/proc/sys/kernel/random/boot_id'),
+      )
+      assert.notEqual(
+        guest(vm, 'cat', '/sys/class/dmi/id/product_uuid'),
+        guest(other, 'cat', '/sys/class/dmi/id/product_uuid'),
+      )
+      assert.notEqual(
+        fs.readFileSync(path.join(root, 'vms', vm.id, 'kvm', 'instance-id'), 'utf8'),
+        fs.readFileSync(path.join(root, 'vms', other.id, 'kvm', 'instance-id'), 'utf8'),
+      )
+    }
     const guestConfig = JSON.parse(docker('exec', other.container_name, 'cat', '/slot/run/codex-kernel.json'))
     assert.equal(guestConfig.proxy_url, `socks5h://${gateway}:${socks.port}`)
     assert.equal(guestConfig.proxy_required, true)

@@ -76,8 +76,70 @@ test('account names are Docker-safe and a new cycle has a unique name', () => {
 })
 
 test('strict slots cannot fall through to legacy Docker lifecycle', () => {
-  const vm = { id: 'space-fixture', execution_mode: 'docker_per_slot' }
-  for (const fn of [startVmRuntime, stopVmRuntime, destroyVmRuntime]) assert.equal(fn(vm).ok, false)
+  for (const execution_mode of ['docker_per_slot', 'kvm_per_slot']) {
+    const vm = { id: 'space-fixture', execution_mode }
+    for (const fn of [startVmRuntime, stopVmRuntime, destroyVmRuntime]) assert.equal(fn(vm).ok, false)
+  }
+})
+
+test('KVM assignments persist spec and identity; retries cannot switch their runtime', async (t) => {
+  const { root, proxyPool } = environment(t)
+  failDocker(t, root)
+  const body = {
+    ...input(),
+    runtime_type: 'kvm',
+    execution_mode: 'kvm_per_slot',
+    machine: { memory: '2g', vcpus: 4, disk_gb: 40 },
+  }
+  await assert.rejects(createManagedCodex(root, body, {}, proxyPool), { code: 'docker_failed' })
+  const first = getVm(root, assignmentId(body))
+  assert.equal(first.execution_mode, 'kvm_per_slot')
+  assert.equal(first.runtime.type, 'kvm')
+  assert.equal(first.machine.vcpus, 4)
+  assert.equal(first.machine.disk_gb, 40)
+  assert.equal(first.machine.memory, '2g')
+  await assert.rejects(
+    createManagedCodex(
+      root,
+      { ...body, runtime_type: 'docker', execution_mode: 'docker_per_slot', machine: { memory: '512m' } },
+      {},
+      proxyPool,
+    ),
+    { code: 'docker_failed' },
+  )
+  const retry = getVm(root, first.id)
+  assert.deepEqual(retry.machine, first.machine)
+  assert.deepEqual(retry.fingerprint, first.fingerprint)
+  assert.equal(retry.execution_mode, first.execution_mode)
+  writeManagedConfig(root, retry)
+  const cfg = JSON.parse(fs.readFileSync(path.join(root, 'vms', first.id, 'run', 'codex-kernel.json')))
+  assert.equal(cfg.socket_path, '/run/kin-guest/kernel.sock')
+  assert.equal(cfg.credential_path, '/slot/codex-credentials.json')
+  const next = { ...body, assignment_id: input().assignment_id }
+  await assert.rejects(createManagedCodex(root, next, {}, proxyPool), { code: 'docker_failed' })
+  const second = getVm(root, assignmentId(next))
+  for (const k of ['hostname', 'device_id', 'session_id', 'guest_machine_id'])
+    assert.notEqual(first.fingerprint[k], second.fingerprint[k])
+  assert.notEqual(first.machine.mac, second.machine.mac)
+  assert.notEqual(first.machine.smbios.uuid, second.machine.smbios.uuid)
+  assert.notEqual(first.machine.smbios.serial, second.machine.smbios.serial)
+  assert.notEqual(first.machine.disk_serial, second.machine.disk_serial)
+})
+
+test('managed creation rejects mismatched runtime and invalid KVM resources', async (t) => {
+  const { root, proxyPool } = environment(t)
+  for (const extra of [
+    { runtime_type: 'kvm', execution_mode: 'docker_per_slot' },
+    { runtime_type: 'other' },
+    { runtime_type: 'kvm', node_id: 'remote' },
+    { runtime_type: 'kvm', machine: { vcpus: 0 } },
+    { runtime_type: 'kvm', machine: { disk_gb: 201 } },
+  ]) {
+    const body = { ...input(), ...extra }
+    await assert.rejects(createManagedCodex(root, body, {}, proxyPool))
+    assert.equal(getVm(root, assignmentId(body)), null)
+    assert.equal(proxyPool.getProxyForVm(assignmentId(body)), null)
+  }
 })
 
 test('deleting an ambiguous create releases only its reservation and prevents resurrection', async (t) => {

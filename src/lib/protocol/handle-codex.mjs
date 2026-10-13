@@ -1,4 +1,5 @@
 import { writeStreamChunk } from '../http/stream-write.mjs'
+import { managedCodex } from '../vm/runtime-kind.mjs'
 import { schedulingSnapshot } from '../vm/scheduling-snapshot.mjs'
 /**
  * Codex hop from handle-protocol. Claude convert/pool/CRS never runs here.
@@ -956,7 +957,7 @@ function plainHeaders(headers) {
 async function postCodexSearch({ projectRoot, vm, body, turnMetadata, fetchImpl, refresh = refreshCodexAccessToken }) {
   // This legacy endpoint bypasses the kernel. Never execute it on the host for
   // a slot whose contract requires all inference to run inside its container.
-  if (vm.execution_mode === 'docker_per_slot')
+  if (managedCodex(vm))
     return {
       ok: false,
       status: 501,

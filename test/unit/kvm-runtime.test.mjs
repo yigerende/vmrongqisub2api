@@ -96,3 +96,35 @@ test('writeKernelConfig uses guest socket path and runtime_kind kvm', () => {
   assert.equal(written.socketPath, path.join(root, 'vms', 'vm-02', 'run', 'kernel.sock'))
   fs.rmSync(root, { recursive: true, force: true })
 })
+
+test('managed KVM boots a guest Codex service with only its own slot mounts', () => {
+  const args = buildKvmRunArgs({
+    vm: { ...vm, assignment_id: 'assignment-test' },
+    name: 'kin-account',
+    image: 'runner',
+    hostName: vm.fingerprint.hostname,
+    network: 'bridge',
+    memory: '2g',
+    accel: 'kvm',
+    uid: 0,
+    gid: 0,
+    home: '/own/cli-home',
+    runDir: '/own/run',
+    kvmDir: '/own/kvm',
+    shares: 'home,run,slot',
+    managedSlot: '/own',
+    managedAssets: '/own/kvm-assets',
+  })
+  for (const value of [
+    'kin.execution=kvm_per_slot',
+    'kin.assignment=assignment-test',
+    'KIN_MANAGED_CODEX=1',
+    'KIN_KVM_SHARES=home,run,slot',
+    '/own:/slot',
+    '/own/kvm-assets/guest:/opt/kin-kvm/guest:ro',
+  ])
+    assert.ok(args.includes(value), value)
+  assert.equal(args.at(-1), '/slot/kvm-assets/kin-kvm-entry')
+  assert.ok(!args.some((s) => s.includes('docker.sock')))
+  assert.ok(!args.includes('--privileged'))
+})

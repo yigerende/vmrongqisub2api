@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { managedCodex } from '../vm/runtime-kind.mjs'
 import { SettingsRepo } from '../db/repos/settings-repo.mjs'
 import { VmQualityRepo } from '../db/repos/vm-quality-repo.mjs'
 import { withTransaction } from '../db/database.mjs'
@@ -249,8 +250,7 @@ export function createVmQualityMonitor({
         slots: slots.map(({ id, assignment_id }) => {
           const vm = current(id)
           if (!vm) return { id, error: 'not_found' }
-          if (vm.assignment_id !== assignment_id || vm.execution_mode !== 'docker_per_slot')
-            return { id, error: 'assignment_mismatch' }
+          if (vm.assignment_id !== assignment_id || !managedCodex(vm)) return { id, error: 'assignment_mismatch' }
           const state = repo.get(id)
           const identity = qualityIdentity(vm)
           const latest = state?.identity === identity ? repo.history(id, 1)[0] : null

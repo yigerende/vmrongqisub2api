@@ -4,6 +4,7 @@
  * without auto-reset, spark shadow, or agent-identity recovery.
  */
 import crypto from 'node:crypto'
+import { managedCodex } from '../vm/runtime-kind.mjs'
 import path from 'node:path'
 import { withVmLock } from '../vm/vm-file.mjs'
 import { getVm, syncCodexQuotaSchedule } from '../vm/vm-registry.mjs'
@@ -401,7 +402,7 @@ async function queryUpstream(slot, { fetchImpl, rotate = true, projectRoot, vmId
 
 export async function queryOpenaiQuota({ projectRoot, vmId, fetchImpl, rotate = true, policy = null } = {}) {
   const vm = getVm(projectRoot, vmId)
-  if (vm?.execution_mode === 'docker_per_slot') {
+  if (managedCodex(vm)) {
     try {
       // Serialize quota persistence with import/delete, while ordinary inference
       // continues. Reading usage must not drain requests or restart the kernel.

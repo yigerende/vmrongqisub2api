@@ -7,8 +7,10 @@ import { fileURLToPath } from 'node:url'
 import { atomicWriteJson, invalidateVmSlotReadCache, withVmLock, writeJsonIfChanged } from './vm-file.mjs'
 import { getVm, patchVmRecord } from './vm-registry.mjs'
 import { toHostPath, hostMapEntries } from './host-path.mjs'
-import { imageForKernel, OS_CATALOG } from './os-catalog.mjs'
+import { imageForKernel, kvmImageForKernel, OS_CATALOG } from './os-catalog.mjs'
 import { slotMemory } from './machine-spec.mjs'
+import { managedCodex } from './runtime-kind.mjs'
+import { probeLocalKvm } from './kvm-host.mjs'
 import { ensureGuestMachineIdFile } from '../identity/workstation-fingerprint.mjs'
 import { codexKernelHealth } from '../transport/codex-kernel-client.mjs'
 import { openAIRuntimeSignals, blockOpenAISlot } from '../pool/openai-account-runtime.mjs'
@@ -18,7 +20,9 @@ const execFileAsync = promisify(execFile)
 const starting = new Map()
 const mutations = new Set()
 const runner = fileURLToPath(new URL('./codex-container-runner.py', import.meta.url))
-export const managedCodex = (vm) => vm?.execution_mode === 'docker_per_slot'
+export { managedCodex }
+const managedKvm = (vm) => vm?.execution_mode === 'kvm_per_slot'
+const kvmAssets = fileURLToPath(new URL('../../../docker/kin-kvm/', import.meta.url))
 const key = (root, id) => path.join(root, 'vms', `${id}.json`)
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 export function containerError(code, message = code, status = 409) {
@@ -52,7 +56,7 @@ export async function inspectManagedContainer(vm) {
   if (
     info.Config?.Labels?.['kin.vm.id'] !== vm.id ||
     info.Config?.Labels?.['kin.assignment'] !== vm.assignment_id ||
-    info.Config?.Labels?.['kin.execution'] !== 'docker_per_slot' ||
+    info.Config?.Labels?.['kin.execution'] !== vm.execution_mode ||
     (vm.runtime?.container_id && vm.runtime.container_id !== info.Id)
   ) {
     throw containerError('container_ownership_mismatch', '容器归属不匹配，拒绝操作')
@@ -94,7 +98,9 @@ export function writeManagedConfig(root, vm) {
     {
       vm_id: vm.id,
       device_id: vm.fingerprint?.device_id || vm.device_id || vm.id,
-      socket_path: '/slot/run/codex-kernel.sock',
+      // Unix sockets cannot cross a 9p mount. KVM uses the existing guest TCP
+      // relay and a host-side Unix socket, with the same internal-token auth.
+      socket_path: managedKvm(vm) ? '/run/kin-guest/kernel.sock' : '/slot/run/codex-kernel.sock',
       credential_path: '/slot/codex-credentials.json',
       internal_token: fs.readFileSync(tokenPath, 'utf8').trim(),
       proxy_url: proxyUrl,
@@ -114,6 +120,12 @@ export async function startManagedContainer(vm, root, { routing } = {}) {
     if (!info.running) await docker(['start', info.id])
   } else {
     if (!OS_CATALOG[vm.kernel]) throw containerError('invalid_kernel')
+    if (managedKvm(vm)) {
+      if (process.arch !== 'x64') throw containerError('kvm_unavailable', '当前 KVM 客体镜像需要 x86_64 宿主机', 503)
+      const probe = await probeLocalKvm({ routing: { ...routing, vm: { ...routing?.vm, allow_tcg: false } } })
+      if (!probe.ok || probe.accel !== 'kvm')
+        throw containerError('kvm_unavailable', probe.error || '本机没有可用的 /dev/kvm', 503)
+    }
     const p = paths(root, vm.id)
     fs.mkdirSync(path.join(p.dir, 'bin'), { recursive: true, mode: 0o700 })
     const bin = process.env.KIN_CODEX_KERNEL_BIN || path.join(root, 'bin', 'kin-codex-kernel')
@@ -121,6 +133,7 @@ export async function startManagedContainer(vm, root, { routing } = {}) {
     fs.copyFileSync(bin, path.join(p.dir, 'bin', 'kin-codex-kernel'))
     fs.chmodSync(path.join(p.dir, 'bin', 'kin-codex-kernel'), 0o555)
     fs.copyFileSync(runner, path.join(p.dir, 'bin', 'runner.py'))
+    fs.mkdirSync(path.join(p.dir, 'cli-home'), { recursive: true, mode: 0o700 })
     writeManagedConfig(root, vm)
     atomicWriteJson(p.control, { revision: crypto.randomUUID(), enabled: false }, { mode: 0o600 })
     const mapping = hostMapEntries({ projectRoot: root })
@@ -133,90 +146,133 @@ export async function startManagedContainer(vm, root, { routing } = {}) {
         '无法确认槽位的宿主挂载路径，请配置 VM2API_CONTAINER_NAME 或 VM2API_HOST_ROOT',
       )
     }
-    const image = imageForKernel(vm.kernel)
+    const image = managedKvm(vm) ? kvmImageForKernel(vm.kernel) : imageForKernel(vm.kernel)
     try {
       await docker(['image', 'inspect', image])
     } catch {
-      await docker(['pull', image], 300000)
+      try {
+        await docker(['pull', image], 300000)
+      } catch (error) {
+        if (!managedKvm(vm)) throw error
+        // Same cloud-image fallback as ordinary KVM slots, without blocking
+        // the control plane while Docker downloads/builds a large image.
+        await docker(
+          ['build', '-t', image, '--build-arg', `CLOUD_IMAGE_URL=${OS_CATALOG[vm.kernel].kvm.cloud_image}`, kvmAssets],
+          900000,
+        )
+      }
     }
     const memory = slotMemory(vm, routing)
     const machineId = ensureGuestMachineIdFile(root, vm)
-    await docker(
-      [
-        'run',
-        '-d',
-        '--name',
-        vm.container_name,
-        '--hostname',
-        vm.fingerprint.hostname,
-        '--restart',
-        'unless-stopped',
-        '--stop-timeout',
-        '10',
-        '--network',
-        'bridge',
-        '--memory',
-        memory,
-        '--memory-swap',
-        memory,
-        '--pids-limit',
-        '128',
-        '--cap-drop',
-        'ALL',
-        '--security-opt',
-        'no-new-privileges',
-        '--read-only',
-        '--tmpfs',
-        '/tmp:rw,nosuid,size=32m',
-        '--user',
-        `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
-        '--label',
-        'kin.vm=1',
-        '--label',
-        `kin.vm.id=${vm.id}`,
-        '--label',
-        `kin.assignment=${vm.assignment_id}`,
-        '--label',
-        'kin.vm.role=codex',
-        '--label',
-        'kin.execution=docker_per_slot',
-        '--mount',
-        `type=bind,src=${toHostPath(p.dir, { projectRoot: root })},dst=/slot`,
-        ...(machineId
-          ? ['--mount', `type=bind,src=${toHostPath(machineId, { projectRoot: root })},dst=/etc/machine-id,readonly`]
-          : []),
-        '-e',
-        `TZ=${vm.timezone || 'UTC'}`,
-        '-e',
-        `LANG=${vm.locale || 'en_US.UTF-8'}`,
-        '--entrypoint',
-        'python3',
-        image,
-        '/slot/bin/runner.py',
-      ],
-      90000,
-    )
+    if (managedKvm(vm)) {
+      await startManagedKvm(vm, root, { image, memory })
+    } else
+      await docker(
+        [
+          'run',
+          '-d',
+          '--name',
+          vm.container_name,
+          '--hostname',
+          vm.fingerprint.hostname,
+          '--restart',
+          'unless-stopped',
+          '--stop-timeout',
+          '10',
+          '--network',
+          'bridge',
+          '--memory',
+          memory,
+          '--memory-swap',
+          memory,
+          '--pids-limit',
+          '128',
+          '--cap-drop',
+          'ALL',
+          '--security-opt',
+          'no-new-privileges',
+          '--read-only',
+          '--tmpfs',
+          '/tmp:rw,nosuid,size=32m',
+          '--user',
+          `${process.getuid?.() ?? 0}:${process.getgid?.() ?? 0}`,
+          '--label',
+          'kin.vm=1',
+          '--label',
+          `kin.vm.id=${vm.id}`,
+          '--label',
+          `kin.assignment=${vm.assignment_id}`,
+          '--label',
+          'kin.vm.role=codex',
+          '--label',
+          'kin.execution=docker_per_slot',
+          '--mount',
+          `type=bind,src=${toHostPath(p.dir, { projectRoot: root })},dst=/slot`,
+          ...(machineId
+            ? ['--mount', `type=bind,src=${toHostPath(machineId, { projectRoot: root })},dst=/etc/machine-id,readonly`]
+            : []),
+          '-e',
+          `TZ=${vm.timezone || 'UTC'}`,
+          '-e',
+          `LANG=${vm.locale || 'en_US.UTF-8'}`,
+          '--entrypoint',
+          'python3',
+          image,
+          '/slot/bin/runner.py',
+        ],
+        90000,
+      )
   }
   info = await inspectManagedContainer(vm)
   if (!info?.running) throw containerError('container_start_failed')
   const runtime = {
     ...vm.runtime,
-    type: 'docker',
+    type: managedKvm(vm) ? 'kvm' : 'docker',
+    ...(managedKvm(vm) ? { accel: 'kvm' } : {}),
     container: vm.container_name,
     container_id: info.id,
     stopped: false,
     worker_run_dir: paths(root, vm.id).run,
     worker_token_file: path.join(paths(root, vm.id).run, 'internal.token'),
-    codex_kernel_socket: path.join(paths(root, vm.id).run, 'codex-kernel.sock'),
+    codex_kernel_socket: path.join(paths(root, vm.id).run, managedKvm(vm) ? 'kernel.sock' : 'codex-kernel.sock'),
     observed_at: info.observed_at,
   }
   patchVmRecord(root, vm.id, { runtime, status: 'running' })
   // Reconcile a crash after docker run but before the runtime record was saved.
   // A retry of an already active assignment must leave its guest kernel running.
-  if (!wasRunning || !vm.runtime?.container_id) await command(root, vm, false)
+  if (!wasRunning || !vm.runtime?.container_id)
+    await command(root, vm, false, { timeoutMs: managedKvm(vm) ? 300000 : 10000, restart: true })
   return { ok: true, runtime }
 }
-async function command(root, vm, enabled, { restart = false } = {}) {
+async function startManagedKvm(vm, root, { image, memory }) {
+  const { buildKvmRunArgs } = await import('./vm-runtime.mjs')
+  const p = paths(root, vm.id)
+  const assets = path.join(p.dir, 'kvm-assets')
+  // Copy into the slot's persistent mount: the control-plane image itself is
+  // not a host path. Also makes new guests work with an already cached KVM image.
+  fs.cpSync(kvmAssets, assets, { recursive: true })
+  fs.mkdirSync(path.join(p.dir, 'kvm'), { recursive: true, mode: 0o700 })
+  const args = buildKvmRunArgs({
+    vm,
+    name: vm.container_name,
+    image,
+    hostName: vm.fingerprint.hostname,
+    network: 'bridge',
+    memory,
+    accel: 'kvm',
+    uid: process.getuid?.() ?? 0,
+    gid: process.getgid?.() ?? 0,
+    home: path.join(p.dir, 'cli-home'),
+    runDir: p.run,
+    kvmDir: path.join(p.dir, 'kvm'),
+    shares: 'home,run,slot',
+    managedSlot: p.dir,
+    managedAssets: assets,
+    hostOf: (value) => toHostPath(value, { projectRoot: root }),
+  })
+  await docker(args.slice(1), 90000)
+}
+async function command(root, vm, enabled, { restart = false, timeoutMs = 10000 } = {}) {
   const p = paths(root, vm.id)
   let previous
   try {
@@ -229,7 +285,7 @@ async function command(root, vm, enabled, { restart = false } = {}) {
   const revision =
     !restart && !stateBefore?.failed && previous?.enabled === enabled ? previous.revision : crypto.randomUUID()
   writeJsonIfChanged(p.control, { revision, enabled }, { mode: 0o600 })
-  const until = Date.now() + 10000
+  const until = Date.now() + timeoutMs
   while (Date.now() < until) {
     let state
     try {

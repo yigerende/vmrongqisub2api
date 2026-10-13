@@ -161,6 +161,7 @@ KIN_KVM_GID=$KIN_KVM_GID
 KIN_KVM_HOSTNAME=$KIN_KVM_HOSTNAME
 KIN_KVM_MACHINE_ID=$KIN_KVM_MACHINE_ID
 KIN_KVM_SHARES=$KIN_KVM_SHARES
+KIN_MANAGED_CODEX=${KIN_MANAGED_CODEX:-0}
 TZ=$TZ
 LANG=$LANG
 EOF
@@ -314,6 +315,10 @@ if has_share claude; then
   mkdir -p /slot/claude
   QEMU+=(-fsdev "local,id=fs_claude,path=/slot/claude,security_model=none,multidevs=remap")
   QEMU+=(-device "virtio-9p-pci,fsdev=fs_claude,mount_tag=kinclaude")
+fi
+if has_share slot; then
+  QEMU+=(-fsdev "local,id=fs_slot,path=/slot,security_model=none,multidevs=remap")
+  QEMU+=(-device "virtio-9p-pci,fsdev=fs_slot,mount_tag=kinslot")
 fi
 QEMU+=(-fsdev "local,id=fs_payload,path=$PAYLOAD,security_model=none,multidevs=remap,readonly=on")
 QEMU+=(-device "virtio-9p-pci,fsdev=fs_payload,mount_tag=kinpayload")

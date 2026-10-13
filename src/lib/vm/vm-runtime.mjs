@@ -10,7 +10,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { readRoutingConfigFile, streamIdleTimeoutMs } from '../core/config.mjs'
 import { US_TIMEZONES, validTimezone } from '../core/timezone.mjs'
-import { runtimeKind, isKvmRuntime, RUNTIME_KVM } from './runtime-kind.mjs'
+import { runtimeKind, isKvmRuntime, RUNTIME_KVM, managedCodex } from './runtime-kind.mjs'
 import { isCodexVm } from './vm-kind.mjs'
 import { buildWorkerTelemetry } from './worker-telemetry.mjs'
 import { kernelBinPath, writeKernelConfig } from '../transport/rust-kernel-supervisor.mjs'
@@ -383,7 +383,7 @@ export function slotWorkerNeedsRecreate(existing, vm, paths) {
  * KVM restarts the guest kin-kernel unit; docker restart would reboot the VM.
  */
 export function reloadSlotWorker(vm, projectRoot, { routing } = {}) {
-  if (vm?.execution_mode === 'docker_per_slot') return { ok: false, error: 'managed_slot_use_panel_start' }
+  if (managedCodex(vm)) return { ok: false, error: 'managed_slot_use_panel_start' }
   if (!vm?.id) return { ok: false, error: 'vm required' }
   const paths = workerPaths(projectRoot, vm.id)
   const name = containerName(vm.id)
@@ -639,6 +639,8 @@ export function buildKvmRunArgs({
   workerBin,
   kernelBin,
   shares = 'home,run',
+  managedSlot,
+  managedAssets,
   hostOf = (p) => p,
 }) {
   const slotName = displayName(vm.id)
@@ -692,6 +694,24 @@ export function buildKvmRunArgs({
     `${hostOf(kvmDir)}:/slot/kvm`,
     ...(workerBin ? ['-v', `${hostOf(workerBin)}:/opt/kin-guest/usr/local/bin/kin-worker:ro`] : []),
     ...(kernelBin ? ['-v', `${hostOf(kernelBin)}:/opt/kin-guest/usr/local/bin/kin-kernel:ro`] : []),
+    ...(managedSlot
+      ? [
+          '--label',
+          `kin.assignment=${vm.assignment_id}`,
+          '--label',
+          'kin.execution=kvm_per_slot',
+          '--label',
+          'kin.vm.role=codex',
+          '-v',
+          `${hostOf(managedSlot)}:/slot`,
+          '-v',
+          `${hostOf(managedAssets)}/guest:/opt/kin-kvm/guest:ro`,
+          '-e',
+          'KIN_MANAGED_CODEX=1',
+          '--entrypoint',
+          '/bin/bash',
+        ]
+      : []),
     ...env.flatMap((pair) => ['-e', pair]),
     ...(process.env.KIN_VM_HOST_GATEWAY === '1' ? ['--add-host', 'host.docker.internal:host-gateway'] : []),
     '--dns',
@@ -699,11 +719,12 @@ export function buildKvmRunArgs({
     '--dns-opt',
     'use-vc',
     image,
+    ...(managedSlot ? ['/slot/kvm-assets/kin-kvm-entry'] : []),
   ]
 }
 
 export function startVmRuntime(vm, projectRoot, { recreate = false, routing, accel: accelOpt } = {}) {
-  if (vm?.execution_mode === 'docker_per_slot') return { ok: false, error: 'managed_slot_use_panel_start' }
+  if (managedCodex(vm)) return { ok: false, error: 'managed_slot_use_panel_start' }
   if (isKvmRuntime(vm) && accelOpt !== 'kvm' && accelOpt !== 'tcg') {
     const recorded = vm.runtime?.accel
     if (recorded !== 'kvm' && recorded !== 'tcg') {
@@ -947,7 +968,7 @@ export function startVmRuntime(vm, projectRoot, { recreate = false, routing, acc
 
 /** Explicit factory reset / delete only. Never call from Node deploy. */
 export function destroyVmRuntime(vm) {
-  if (vm?.execution_mode === 'docker_per_slot') return { ok: false, error: 'managed_slot_use_panel_delete' }
+  if (managedCodex(vm)) return { ok: false, error: 'managed_slot_use_panel_delete' }
   if (!vm?.id) return { ok: false, error: 'vm required' }
   const name = containerName(vm.id)
   const info = inspectContainer(name)
@@ -964,7 +985,7 @@ export function destroyVmRuntime(vm) {
 }
 
 export function stopVmRuntime(vm) {
-  if (vm?.execution_mode === 'docker_per_slot') return { ok: false, error: 'managed_slot_use_panel_stop' }
+  if (managedCodex(vm)) return { ok: false, error: 'managed_slot_use_panel_stop' }
   const name = containerName(vm.id)
   const info = inspectContainer(name)
   if (!info) {

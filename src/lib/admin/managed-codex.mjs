@@ -15,7 +15,7 @@ import {
 import { removeVmFromDb, clearActiveVmFromDb } from '../vm/vm-db-sync.mjs'
 import { OS_CATALOG } from '../vm/os-catalog.mjs'
 import { resolveMachineSpec } from '../vm/machine-spec.mjs'
-import { generateWorkstationFingerprint } from '../identity/workstation-fingerprint.mjs'
+import { generateWorkstationFingerprint, takenFingerprintKeys } from '../identity/workstation-fingerprint.mjs'
 import { parseCodexImportPayload, upsertCodexAccount, readCodexAccounts } from '../vm/codex-slot.mjs'
 import { vmPoolsFor } from './vm-pools.mjs'
 import { getDb } from '../db/database.mjs'
@@ -123,8 +123,15 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
     if (!vm) {
       const email = String(body.account_email || '').trim()
       if (!email || email.length > 254) throw containerError('invalid_email', '需要账号邮箱', 400)
-      if (body.platform !== 'openai' || body.runtime_type !== 'docker' || body.node_id) {
-        throw containerError('invalid_runtime', '集成槽位必须为本机 GPT Docker', 400)
+      const runtime = body.runtime_type || 'docker'
+      const executionMode = runtime === 'kvm' ? 'kvm_per_slot' : 'docker_per_slot'
+      if (
+        body.platform !== 'openai' ||
+        !['docker', 'kvm'].includes(runtime) ||
+        body.node_id ||
+        (body.execution_mode && body.execution_mode !== executionMode)
+      ) {
+        throw containerError('invalid_runtime', '集成槽位必须为本机 GPT Docker 或 KVM，形态与执行模式必须一致', 400)
       }
       const kernel = body.kernel || 'ubuntu-24.04'
       if (!OS_CATALOG[kernel]) throw containerError('invalid_kernel', '系统不支持', 400)
@@ -140,7 +147,7 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
         assignment_id: assignment,
         account_email: email,
         name: email,
-        execution_mode: 'docker_per_slot',
+        execution_mode: executionMode,
         container_name: accountContainerName(email, id),
         pool_id: poolId || null,
         platform: 'openai',
@@ -149,9 +156,12 @@ export async function createManagedCodex(root, body, routing = {}, proxyPool) {
         kernel,
         locale,
         region: String(body.region || ''),
-        runtime: { type: 'docker' },
-        machine: resolveMachineSpec({ config: routing.vm, overrides: body.machine, runtime: 'docker' }),
-        fingerprint: generateWorkstationFingerprint({ id, kernel, locale }),
+        runtime: { type: runtime },
+        machine: resolveMachineSpec({ config: routing.vm, overrides: body.machine, runtime }),
+        fingerprint: generateWorkstationFingerprint(
+          { id, kernel, locale },
+          { taken: takenFingerprintKeys(listVms(root)) },
+        ),
         proxy: { id: selectManagedProxy(proxyPool, body) },
         policy: {},
         codex: {},

@@ -10,6 +10,7 @@
  * official four-gate inbound (context-1m / CC session scope would 401).
  */
 import http from 'node:http'
+import { managedCodex } from '../vm/runtime-kind.mjs'
 import fs from 'node:fs'
 import { Readable } from 'node:stream'
 import path from 'node:path'
@@ -216,7 +217,7 @@ export async function syncCodexCatalog({
           catalogVersion: catalogVersion.version,
         })
       let live = await fetchOnce()
-      if (live.error === 'upstream_auth' && rotate && refreshToken && target.execution_mode !== 'docker_per_slot') {
+      if (live.error === 'upstream_auth' && rotate && refreshToken && !managedCodex(target)) {
         const tok = await refreshCodexAccessToken({ refreshToken, proxyUrl, fetchImpl })
         if (!tok.ok) {
           lastError = {
@@ -1165,7 +1166,7 @@ export async function runVmTestChat(opts = {}) {
       timeoutMs,
       extraHeaders: opts.extraHeaders || {},
     })
-    if (codex && vm.execution_mode !== 'docker_per_slot' && !result?.ok && looksLikeCodexUnauthorized(result)) {
+    if (codex && !managedCodex(vm) && !result?.ok && looksLikeCodexUnauthorized(result)) {
       const first = readCodexAccounts(projectRoot, vmId)[0] || {}
       const refreshToken = String(first.refresh_token || '').trim()
       if (refreshToken) {

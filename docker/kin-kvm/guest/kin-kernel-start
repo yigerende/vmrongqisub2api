@@ -1,6 +1,9 @@
 #!/bin/sh
 # First existing kernel binary, then gateway-worker against the 9p config.
 set -eu
+if [ "${KIN_MANAGED_CODEX:-0}" = 1 ]; then
+  exec python3 /slot/bin/runner.py
+fi
 for p in /home/kincli/.kin/kin-kernel /usr/local/bin/kin-kernel /opt/kin/kin-kernel; do
   if [ -x "$p" ]; then
     exec "$p" --gateway-worker --config /run/kin/kernel.json

@@ -31,6 +31,11 @@ load_env() {
 }
 
 ensure_user() {
+  # The managed Codex service runs inside the VM as root. The 9p server still
+  # uses the control plane's host UID, so atomic credential writes keep working.
+  if [ "${KIN_MANAGED_CODEX:-0}" = 1 ]; then
+    return 0
+  fi
   gname=kincli
   if getent group "$KIN_KVM_GID" >/dev/null 2>&1; then
     gname=$(getent group "$KIN_KVM_GID" | cut -d: -f1)
@@ -139,8 +144,10 @@ apply_resolv() {
 
 write_slot_env() {
   mkdir -p /run/kin-guest /etc/systemd/system/kin-kernel.service.d
+  slot_home=/home/kincli
+  if [ "${KIN_MANAGED_CODEX:-0}" = 1 ]; then slot_home=/slot/cli-home; fi
   cat > /run/kin-guest/slot.env <<EOF
-HOME=/home/kincli
+HOME=$slot_home
 CLAUDE_CONFIG_DIR=/home/kincli/.claude
 TZ=${TZ:-UTC}
 LANG=${LANG:-C.UTF-8}
@@ -148,6 +155,7 @@ KIN_VM_ID=${KIN_VM_ID:-}
 KIN_VM_NAME=${KIN_VM_NAME:-}
 KIN_VM_OS=${KIN_VM_OS:-}
 KIN_SUBMIT_WAIT_MS=30000
+KIN_MANAGED_CODEX=${KIN_MANAGED_CODEX:-0}
 EOF
   chown kincli:"$KIN_KVM_GID" /run/kin-guest /run/kin-guest/slot.env 2>/dev/null || true
   chmod 0770 /run/kin-guest
@@ -155,6 +163,13 @@ EOF
 [Service]
 Group=${KIN_KVM_GID}
 EOF
+  if [ "${KIN_MANAGED_CODEX:-0}" = 1 ]; then
+    cat >> /etc/systemd/system/kin-kernel.service.d/slot.conf <<EOF
+User=root
+Group=root
+Environment=HOME=/slot/cli-home
+EOF
+  fi
   systemctl daemon-reload 2>/dev/null || true
 }
 
@@ -188,6 +203,9 @@ if has_share claude; then
 fi
 if has_share run; then
   mount_9p kinrun /run/kin none
+fi
+if has_share slot; then
+  mount_9p kinslot /slot none
 fi
 mount_9p kinpayload /opt/kin-payload loose
 

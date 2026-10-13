@@ -7,6 +7,43 @@ on:
 permissions:
   contents: read
 jobs:
+  kvm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: debian-12
+            image: ghcr.io/dofastted/kin-kvm-debian:12
+            cloud: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2
+          - os: ubuntu-24.04
+            image: ghcr.io/dofastted/kin-kvm-ubuntu:24.04
+            cloud: https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run fetch:payload
+      - name: Prepare KVM on the disposable runner
+        run: |
+          test -c /dev/kvm
+          sudo chmod 666 /dev/kvm
+          docker pull busybox:1.37
+      - name: Build KVM guest runner
+        env:
+          GUEST_IMAGE: ${{ matrix.image }}
+          CLOUD_URL: ${{ matrix.cloud }}
+        run: docker build -t "$GUEST_IMAGE" --build-arg "CLOUD_IMAGE_URL=$CLOUD_URL" docker/kin-kvm
+      - name: Verify real KVM isolation, Codex kernel and lifecycle
+        env:
+          KIN_DOCKER_TEST: '1'
+          KIN_MANAGED_RUNTIME: kvm
+          KIN_KVM_TEST_OS: ${{ matrix.os }}
+        run: node --test test/e2e/managed-codex.docker.mjs
   docker:
     runs-on: ubuntu-latest
     timeout-minutes: 15

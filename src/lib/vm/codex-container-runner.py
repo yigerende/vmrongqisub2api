@@ -47,7 +47,8 @@ while not quitting:
             revision = control['revision']
             failed = False
             if control.get('enabled'):
-                socket = ROOT + '/run/codex-kernel.sock'
+                with open(ROOT + '/run/codex-kernel.json') as config_source:
+                    socket = json.load(config_source)['socket_path']
                 if os.path.exists(socket):
                     os.unlink(socket)
                 child = subprocess.Popen([ROOT + '/bin/kin-codex-kernel', ROOT + '/run/codex-kernel.json'],
