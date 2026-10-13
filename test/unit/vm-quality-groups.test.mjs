@@ -323,6 +323,20 @@ test('invalid/mutually exclusive configurations are rejected without changing pe
   assert.deepEqual(validateQualityConfig(legacy).degraded_group_ids, [])
 })
 
+test('all-account detection toggles remain usable when a configured group becomes unavailable', (t) => {
+  const f = fixture(t)
+  f.monitor.setEnabled([], true, true)
+  f.pools.setEnabled(f.target[0], false)
+  f.pools.remove(f.target[1])
+  assert.equal(f.monitor.setEnabled([], false, true).count, 1)
+  assert.equal(f.monitor.getConfig().default_enabled, false)
+  assert.equal(f.snapshot().enabled, false)
+  f.restart()
+  assert.equal(f.monitor.getConfig().default_enabled, false)
+  assert.equal(f.monitor.setEnabled([], true, true).count, 1)
+  assert.equal(f.snapshot().enabled, true)
+})
+
 test('target becoming unavailable prevents all changes and retries after repair', async (t) => {
   const f = fixture(t)
   f.config({ failure_limit: 1, recovery_limit: 1 })

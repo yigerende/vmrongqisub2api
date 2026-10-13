@@ -98,7 +98,13 @@ export function createVmQualityMonitor({
       const job = pending.get(vm.id)
       if (!enabled && job?.source === 'auto' && !job.started) pending.delete(vm.id)
     }
-    if (all) setConfig({ ...config, default_enabled: enabled })
+    if (all) {
+      // Detection toggles must still work if a configured target group was later removed/disabled.
+      // This changes no probe/action policy, so keep the current revision and streaks.
+      const next = { ...config, default_enabled: enabled }
+      settings.set(CONFIG_KEY, next)
+      config = next
+    }
     return { count: targets.length, enabled }
   }
 
