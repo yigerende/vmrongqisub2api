@@ -50,6 +50,17 @@ export class VmQualityRepo {
       .run(failures, recoveries, version, id)
   }
 
+  acknowledgeGroups(id) {
+    this.db
+      .prepare(`UPDATE vm_quality_state SET group_version = membership_version,
+      original_group_ids = NULL, switched_group_ids = NULL, group_action_error = NULL WHERE vm_id = ?`)
+      .run(id)
+  }
+
+  groupError(id, message) {
+    this.db.prepare('UPDATE vm_quality_state SET group_action_error = ? WHERE vm_id = ?').run(message, id)
+  }
+
   history(id, limit = 16) {
     return this.db
       .prepare('SELECT id, payload FROM vm_quality_history WHERE vm_id = ? ORDER BY id DESC LIMIT ?')

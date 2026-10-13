@@ -33,7 +33,6 @@ export class VmPoolsRepo {
     this._enabled = db.prepare('UPDATE vm_pools SET enabled = ?, updated_at = ? WHERE id = ?')
     this._touch = db.prepare('UPDATE vm_pools SET updated_at = ? WHERE id = ?')
     this._delete = db.prepare('DELETE FROM vm_pools WHERE id = ?')
-    this._clearMembers = db.prepare('DELETE FROM vm_pool_members WHERE pool_id = ?')
     this._addMember = db.prepare('INSERT INTO vm_pool_members (pool_id, vm_id, created_at) VALUES (?, ?, ?)')
     this._keyCount = db.prepare('SELECT COUNT(*) AS n FROM api_keys WHERE vm_pool_id = ? AND deleted_at IS NULL')
   }
@@ -96,8 +95,12 @@ export class VmPoolsRepo {
     if (!this._get.get(id)) return null
     const now = nowIso()
     withTransaction(this.db, () => {
-      this._clearMembers.run(id)
-      for (const vmId of new Set(vmIds)) this._addMember.run(id, vmId, now)
+      // Preserve unchanged memberships and their quality recovery ownership.
+      const previous = new Set(this._ids(id))
+      const next = new Set(vmIds)
+      const remove = this.db.prepare('DELETE FROM vm_pool_members WHERE pool_id = ? AND vm_id = ?')
+      for (const vmId of previous) if (!next.has(vmId)) remove.run(id, vmId)
+      for (const vmId of next) if (!previous.has(vmId)) this._addMember.run(id, vmId, now)
       this._touch.run(now, id)
     })
     return this.get(id)

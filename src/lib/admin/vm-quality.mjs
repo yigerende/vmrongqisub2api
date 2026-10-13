@@ -5,6 +5,7 @@ import { VmQualityRepo } from '../db/repos/vm-quality-repo.mjs'
 import { withTransaction } from '../db/database.mjs'
 import { DEFAULT_QUALITY_CONFIG, evaluateQuality, validateQualityConfig } from './vm-quality-config.mjs'
 import { qualityIdentity, qualityOwnsPause, qualityScheduleVersion } from './vm-quality-identity.mjs'
+import { createQualityGroupActions } from './vm-quality-groups.mjs'
 
 export { qualityIdentity } from './vm-quality-identity.mjs'
 
@@ -22,6 +23,7 @@ export function createVmQualityMonitor({
 }) {
   const settings = new SettingsRepo(db)
   const repo = new VmQualityRepo(db)
+  const groupActions = createQualityGroupActions(db, repo)
   let config = validateQualityConfig(settings.get(CONFIG_KEY, DEFAULT_QUALITY_CONFIG))
   let revision = settings.get(REVISION_KEY, null) || crypto.randomUUID()
   settings.set(REVISION_KEY, revision)
@@ -32,8 +34,14 @@ export function createVmQualityMonitor({
   const tasks = new Set()
   const current = getTarget || ((id) => listTargets().find((v) => v.id === id))
   const stateFor = (vm) => {
-    const state = repo.ensure(vm.id, qualityIdentity(vm), config.default_enabled)
+    let state = repo.ensure(vm.id, qualityIdentity(vm), config.default_enabled)
     const version = qualityScheduleVersion(vm)
+    if (state.group_version !== state.membership_version) {
+      // Manual membership edits cancel automatic restoration and stale in-flight samples.
+      if (config.switch_groups_on_degraded || state.original_group_ids !== null) repo.streaks(vm.id, 0, 0, version)
+      repo.acknowledgeGroups(vm.id)
+      state = repo.get(vm.id)
+    }
     if (state.schedule_version === version) return state
     // A manual toggle or another scheduling writer starts a fresh streak.
     repo.streaks(vm.id, 0, 0, version)
@@ -50,6 +58,8 @@ export function createVmQualityMonitor({
       failure_streak: state.failure_streak,
       recovery_streak: state.recovery_streak,
       paused_by_quality: qualityOwnsPause(vm, state.identity),
+      groups_switched_by_quality: state.original_group_ids !== null,
+      group_action_error: state.group_action_error,
       // Polling the fleet must not transfer every long model answer. Details are on demand.
       history: repo.history(vm.id, limit).map((result) => {
         if (full) return result
@@ -61,6 +71,7 @@ export function createVmQualityMonitor({
 
   function setConfig(input) {
     const next = validateQualityConfig(input)
+    if (next.switch_groups_on_degraded) groupActions.assertEnabled(next.degraded_group_ids)
     const changed =
       JSON.stringify({ ...config, default_enabled: false }) !== JSON.stringify({ ...next, default_enabled: false })
     const nextRevision = changed ? crypto.randomUUID() : revision
@@ -100,6 +111,7 @@ export function createVmQualityMonitor({
       const q = structuredClone(config)
       const runRevision = revision
       const runScheduleVersion = qualityScheduleVersion(vm)
+      const runMembershipVersion = state.membership_version
       const questions = q.questions.filter((item) => item.enabled)
       const question = questions[state.question_cursor % questions.length]
       const startedAt = now()
@@ -142,10 +154,12 @@ export function createVmQualityMonitor({
         recorded &&
         runRevision === revision &&
         runScheduleVersion === qualityScheduleVersion(latest) &&
-        config.pause_on_degraded &&
+        (config.pause_on_degraded || config.switch_groups_on_degraded || latestState.original_group_ids !== null) &&
+        (!(config.switch_groups_on_degraded || latestState.original_group_ids !== null) ||
+          runMembershipVersion === latestState.membership_version) &&
         (job.source === 'manual' || latestState.enabled)
       ) {
-        applyScheduleResult(latest, latestState, verdict.status)
+        applyActionResult(latest, latestState, verdict.status)
       }
     } catch (error) {
       onError('[vm-quality]', error)
@@ -156,12 +170,25 @@ export function createVmQualityMonitor({
     }
   }
 
-  function applyScheduleResult(vm, state, status) {
+  function applyActionResult(vm, state, status) {
     if (status === 'error') return // Yellow does not increment or break either streak.
     const failures = status === 'degraded' ? Math.min(state.failure_streak + 1, 1000) : 0
     const recoveries = status === 'normal' ? Math.min(state.recovery_streak + 1, 1000) : 0
     repo.streaks(vm.id, failures, recoveries, qualityScheduleVersion(vm))
-    if (!changeSchedule || vm.status !== 'running' || !vm.has_token) return
+    if (vm.status !== 'running' || !vm.has_token) return
+    const switchGroups = config.switch_groups_on_degraded && status === 'degraded' && failures >= config.failure_limit
+    // Disabling the action stops new moves, but retains recovery of already moved accounts.
+    const restoreGroups =
+      state.original_group_ids !== null && status === 'normal' && recoveries >= config.recovery_limit
+    if (switchGroups || restoreGroups) {
+      try {
+        groupActions.change(state, config.degraded_group_ids, restoreGroups)
+      } catch (error) {
+        repo.groupError(vm.id, String(error.message).slice(0, 500))
+        onError('[vm-quality-groups]', error)
+      }
+    }
+    if (!config.pause_on_degraded || !changeSchedule) return
     const pause = status === 'degraded' && failures >= config.failure_limit && vm.schedulable !== false
     const resume = status === 'normal' && recoveries >= config.recovery_limit && qualityOwnsPause(vm, state.identity)
     if (!pause && !resume) return

@@ -114,6 +114,19 @@ export function VmQualityStatus({ vm }: { vm: Vm }) {
           降智暂停 · 连续恢复 {snapshot.recovery_streak} 次
         </p>
       )}
+      {snapshot?.groups_switched_by_quality && (
+        <p className='text-[10px] text-amber-600 dark:text-amber-400'>
+          降智已切组 · 连续恢复 {snapshot.recovery_streak} 次
+        </p>
+      )}
+      {snapshot?.group_action_error && (
+        <p
+          className='max-w-60 text-[10px] text-destructive'
+          title={snapshot.group_action_error}
+        >
+          切组/还原失败：{snapshot.group_action_error}
+        </p>
+      )}
       {enabled || rows.length > 0 || running ? (
         <div
           className='flex items-center gap-1'

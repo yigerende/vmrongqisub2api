@@ -15,6 +15,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { vmPoolsQueryOptions } from '@/features/keys/vm-pools-card'
 import type { QualityConfig, QualityQuestion } from './quality-types'
 
 const selectClass = 'h-9 w-full rounded-md border bg-background px-2 text-sm'
@@ -110,6 +111,21 @@ function QualityForm({
   onSaved: () => void
 }) {
   const [value, setValue] = useState(initial)
+  const groupsQuery = useQuery({
+    ...vmPoolsQueryOptions(),
+    enabled: value.switch_groups_on_degraded,
+    refetchInterval: value.switch_groups_on_degraded ? 5000 : false,
+  })
+  const groups = groupsQuery.data?.pools || []
+  const unavailableGroups = value.degraded_group_ids.filter(
+    (id) => !groups.some((group) => group.id === id && group.enabled)
+  )
+  const invalidGroups =
+    value.switch_groups_on_degraded &&
+    (!value.degraded_group_ids.length ||
+      groupsQuery.isPending ||
+      groupsQuery.isError ||
+      unavailableGroups.length > 0)
   const qc = useQueryClient()
   const set = <K extends keyof QualityConfig>(key: K, next: QualityConfig[K]) =>
     setValue((old) => ({ ...old, [key]: next }))
@@ -138,6 +154,7 @@ function QualityForm({
       className='space-y-5'
       onSubmit={(e) => {
         e.preventDefault()
+        if (invalidGroups) return
         save.mutate()
       }}
     >
@@ -214,14 +231,115 @@ function QualityForm({
         </label>
       </div>
       <div className='space-y-3 rounded-lg border p-3'>
-        <label className='flex items-center gap-2 text-sm font-medium'>
-          <Switch
-            checked={value.pause_on_degraded}
-            aria-label='降智后暂停调度'
-            onCheckedChange={(next) => set('pause_on_degraded', next)}
-          />
-          降智后暂停调度
-        </label>
+        <div className='grid gap-3 sm:grid-cols-2'>
+          <label className='flex items-center gap-2 text-sm font-medium'>
+            <Switch
+              checked={value.pause_on_degraded}
+              aria-label='降智后暂停调度'
+              onCheckedChange={(next) =>
+                setValue((old) => ({
+                  ...old,
+                  pause_on_degraded: next,
+                  switch_groups_on_degraded: next
+                    ? false
+                    : old.switch_groups_on_degraded,
+                }))
+              }
+            />
+            降智后暂停调度
+          </label>
+          <label className='flex items-center gap-2 text-sm font-medium'>
+            <Switch
+              checked={value.switch_groups_on_degraded}
+              aria-label='降智后切换分组'
+              onCheckedChange={(next) =>
+                setValue((old) => ({
+                  ...old,
+                  switch_groups_on_degraded: next,
+                  pause_on_degraded: next ? false : old.pause_on_degraded,
+                }))
+              }
+            />
+            降智后切换分组
+          </label>
+        </div>
+        {value.switch_groups_on_degraded && (
+          <fieldset className='space-y-2'>
+            <legend className='text-xs font-medium'>
+              切换到的账号分组（可多选）
+            </legend>
+            {groupsQuery.isPending ? (
+              <p className='text-xs text-muted-foreground'>正在读取分组…</p>
+            ) : groupsQuery.isError ? (
+              <div className='flex items-center gap-2 text-xs text-destructive'>
+                读取分组失败：{groupsQuery.error.message}
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  onClick={() => void groupsQuery.refetch()}
+                >
+                  重试
+                </Button>
+              </div>
+            ) : (
+              <>
+                <div className='grid max-h-40 gap-2 overflow-y-auto rounded-md border p-2 sm:grid-cols-2'>
+                  {[
+                    ...groups,
+                    ...value.degraded_group_ids
+                      .filter((id) => !groups.some((group) => group.id === id))
+                      .map((id) => ({
+                        id,
+                        name: `${id}（已删除）`,
+                        enabled: false,
+                      })),
+                  ].map((group) => (
+                    <label
+                      key={group.id}
+                      className='flex items-center gap-2 text-xs'
+                    >
+                      <input
+                        type='checkbox'
+                        checked={value.degraded_group_ids.includes(group.id)}
+                        disabled={
+                          !group.enabled &&
+                          !value.degraded_group_ids.includes(group.id)
+                        }
+                        onChange={(e) =>
+                          set(
+                            'degraded_group_ids',
+                            e.target.checked
+                              ? [...value.degraded_group_ids, group.id]
+                              : value.degraded_group_ids.filter(
+                                  (id) => id !== group.id
+                                )
+                          )
+                        }
+                      />
+                      {group.name}
+                      {!group.enabled && '（不可选）'}
+                    </label>
+                  ))}
+                  {!groups.length && !value.degraded_group_ids.length && (
+                    <p className='text-xs text-muted-foreground'>
+                      暂无分组，请先在账号分组中创建。
+                    </p>
+                  )}
+                </div>
+                {(!value.degraded_group_ids.length ||
+                  unavailableGroups.length > 0) && (
+                  <p className='text-xs text-destructive'>
+                    请至少选择一个已启用分组，并取消不可用的分组。
+                  </p>
+                )}
+              </>
+            )}
+            <p className='text-xs text-muted-foreground'>
+              达标后替换账号的全部分组，恢复后还原。分组限制适用于绑定分组的密钥；全局密钥仍可使用全部账号。
+            </p>
+          </fieldset>
+        )}
         <div className='grid gap-3 sm:grid-cols-2'>
           {(
             [
@@ -238,18 +356,21 @@ function QualityForm({
                 max={1000}
                 step={1}
                 required
-                disabled={!value.pause_on_degraded}
+                disabled={
+                  !value.pause_on_degraded && !value.switch_groups_on_degraded
+                }
                 onChange={(e) => set(key, Number(e.target.value))}
               />
             </label>
           ))}
         </div>
         <p className='text-xs text-muted-foreground'>
-          连续红色达到次数后暂停调度，连续绿色达到次数后恢复。黄色请求失败不计数，也不中断连续次数；手动检测同样计数。
-          仅恢复由降智检测暂停的账号，手动暂停不会自动开启。暂停期间自动检测继续运行。
+          两种动作只能启用一种，也可全部关闭。连续红色达标后执行所选动作，连续绿色达标后恢复调度或原分组。黄色请求失败不计数，也不中断连续次数；手动检测同样计数。
+          仅恢复由降智检测暂停的账号，手动暂停不会自动开启。暂停或切组后自动检测继续运行。
         </p>
         <p className='text-xs text-muted-foreground'>
-          修改检测配置或手动切换调度后重新计数。关闭此选项不会自动开启已暂停账号，可手动开启调度。
+          修改检测配置或手动切换调度后重新计数。关闭暂停选项不会自动开启已暂停账号，可手动开启调度。
+          关闭切组选项仅停止新的切换，已切组账号仍在后续检测恢复达标后还原；手动修改账号分组后以手动设置为准，取消旧分组还原并重新计数。
         </p>
       </div>
       <div className='space-y-3'>
@@ -367,10 +488,10 @@ function QualityForm({
       </div>
       <p className='text-xs text-muted-foreground'>
         标准答案支持纯答案或单行
-        FINAL_ANSWER=答案。开启“降智后暂停调度”才会按连续次数调整调度开关。
+        FINAL_ANSWER=答案。切换分组只改变账号的分组归属。
       </p>
       <DialogFooter>
-        <Button type='submit' disabled={save.isPending}>
+        <Button type='submit' disabled={save.isPending || invalidGroups}>
           {save.isPending ? '保存中…' : '保存配置'}
         </Button>
       </DialogFooter>

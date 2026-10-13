@@ -39,8 +39,25 @@ test('real control plane starts with quality monitor and restores saved config a
   assert.equal(dismissed.json.data.status, 'dismissed')
   const config = await api(gateway, 'GET', '/api/panel/vm-quality/settings')
   assert.equal(config.status, 200, config.text)
+  const groups = []
+  for (const name of ['Degraded A', 'Degraded B']) {
+    const group = await api(gateway, 'POST', '/api/panel/vm-pools', { body: { name } })
+    assert.equal(group.status, 201, group.text)
+    groups.push(group.json.data.pool.id)
+  }
+  const next = {
+    ...config.json.data,
+    interval_seconds: 120,
+    mode: 'content',
+    switch_groups_on_degraded: true,
+    degraded_group_ids: groups,
+  }
+  const invalid = await api(gateway, 'PUT', '/api/panel/vm-quality/settings', {
+    body: { ...next, pause_on_degraded: true },
+  })
+  assert.equal(invalid.status, 400, invalid.text)
   const saved = await api(gateway, 'PUT', '/api/panel/vm-quality/settings', {
-    body: { ...config.json.data, interval_seconds: 120, mode: 'content' },
+    body: next,
   })
   assert.equal(saved.status, 200, saved.text)
   await gateway.stop()
@@ -52,6 +69,8 @@ test('real control plane starts with quality monitor and restores saved config a
   assert.equal(restored.status, 200, restored.text)
   assert.equal(restored.json.data.interval_seconds, 120)
   assert.equal(restored.json.data.mode, 'content')
+  assert.equal(restored.json.data.switch_groups_on_degraded, true)
+  assert.deepEqual(restored.json.data.degraded_group_ids, groups.sort())
   const list = await api(gateway, 'GET', '/api/panel/vms')
   assert.equal(list.status, 200, list.text)
   assert.deepEqual(list.json.data.items, [])

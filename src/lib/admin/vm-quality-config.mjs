@@ -1,4 +1,5 @@
 import { runInNewContext } from 'node:vm'
+import { normalizeVmGroupIds } from './vm-account-groups.mjs'
 
 export const DEFAULT_QUALITY_CONFIG = {
   model: 'gpt-5.4',
@@ -12,6 +13,8 @@ export const DEFAULT_QUALITY_CONFIG = {
   history_limit: 200,
   default_enabled: false,
   pause_on_degraded: false,
+  switch_groups_on_degraded: false,
+  degraded_group_ids: [],
   failure_limit: 2,
   recovery_limit: 1,
   questions: [
@@ -57,6 +60,10 @@ export function validateQualityConfig(input) {
   if (!['content', 'time', 'content_time'].includes(q.mode)) throw new Error('判断方式无效')
   if (typeof q.default_enabled !== 'boolean') throw new Error('新增账号开关无效')
   if (typeof q.pause_on_degraded !== 'boolean') throw new Error('降智暂停调度开关无效')
+  if (typeof q.switch_groups_on_degraded !== 'boolean') throw new Error('降智切换分组开关无效')
+  if (q.pause_on_degraded && q.switch_groups_on_degraded) throw new Error('暂停调度和切换分组只能选择一项')
+  q.degraded_group_ids = normalizeVmGroupIds(q.degraded_group_ids)
+  if (q.switch_groups_on_degraded && !q.degraded_group_ids.length) throw new Error('请至少选择一个降智后切换的分组')
   for (const [key, min, max] of [
     ['interval_seconds', 10, 86400],
     ['retry_seconds', 10, 86400],
