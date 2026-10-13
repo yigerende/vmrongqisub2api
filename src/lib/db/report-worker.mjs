@@ -17,6 +17,7 @@ const allowed = {
     'vmUsageStats',
     'keyUsageStats',
     'windowStats',
+    'statsBundle',
     'protocolEntryStats',
     'listDebug',
     'getDebug',

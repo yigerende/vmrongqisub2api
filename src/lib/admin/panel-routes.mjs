@@ -1595,16 +1595,26 @@ export function createPanelHandler(ctx) {
         const until = u.searchParams.get('until') || null
         const tenant = panelIdentity(req).role === 'user'
         const owner_user_id = tenant ? req.panelUserId : u.searchParams.get('user_id') || null
+        const bundle =
+          typeof requestLog.statsBundle === 'function'
+            ? await readLog(requestLog, 'statsBundle', { since, until, bucket, owner_user_id, includeTotals: !tenant })
+            : null
         return json(res, 200, {
           ok: true,
           bucket,
           since,
           until,
-          totals: tenant ? null : await readLog(requestLog, 'totals'),
-          buckets: await readLog(requestLog, 'aggregate', { since, until, bucket, owner_user_id }),
-          window: await readLog(requestLog, 'windowStats', { since, until, owner_user_id }),
+          totals: bundle ? bundle.totals : tenant ? null : await readLog(requestLog, 'totals'),
+          buckets: bundle
+            ? bundle.buckets
+            : await readLog(requestLog, 'aggregate', { since, until, bucket, owner_user_id }),
+          window: bundle ? bundle.window : await readLog(requestLog, 'windowStats', { since, until, owner_user_id }),
           muted_error_classes: requestLog.mutedErrorClasses || requestLog.snapshot().muted_error_classes,
-          config: tenant ? null : await (requestLog.snapshotAsync?.() || requestLog.snapshot()),
+          config: tenant
+            ? null
+            : bundle
+              ? { ...requestLog.snapshot({ count: false }), total_rows: bundle.totalRows }
+              : await (requestLog.snapshotAsync?.() || requestLog.snapshot()),
         })
       }
       if (req.method === 'GET' && /^\/api\/panel\/request-logs\/[^/]+\/attempts$/.test(p)) {

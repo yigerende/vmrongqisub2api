@@ -547,6 +547,17 @@ export class RequestLogStore {
     return this.repo.windowStats(opts)
   }
 
+  // One reader turn for the stats page. Filters and calculations are exactly
+  // the existing methods; avoid four flush/IPC round trips under inference load.
+  statsBundle({ includeTotals = true, ...opts } = {}) {
+    return {
+      totals: includeTotals ? this.totals() : null,
+      buckets: this.aggregate(opts),
+      window: this.windowStats(opts),
+      totalRows: includeTotals ? this.count() : null,
+    }
+  }
+
   protocolEntryStats(opts = {}) {
     return this.repo.protocolEntryStats(opts)
   }

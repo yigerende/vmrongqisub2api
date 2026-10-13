@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
+import { randomBytes } from 'node:crypto'
 
 const arg = (name, fallback) => process.argv.find((item) => item.startsWith(`--${name}=`))?.split('=')[1] ?? fallback
 const workers = Number(arg('workers', 8))
@@ -41,6 +42,13 @@ const child = fork(new URL('../test/helpers/performance-gateway.mjs', import.met
 })
 const exit = new Promise((resolve) => child.once('exit', resolve))
 const results = []
+const bodyChars = Number(arg('body-chars', 2000))
+const requestInput =
+  arg('body-entropy', 'low') === 'high'
+    ? randomBytes(Math.ceil((bodyChars * 3) / 4))
+        .toString('base64')
+        .slice(0, bodyChars)
+    : 'b'.repeat(bodyChars)
 let requests = 0
 const percentile = (values, p) =>
   values.length
@@ -95,7 +103,7 @@ try {
               },
               body: JSON.stringify({
                 model: 'gpt-6.1-sol',
-                input: 'b'.repeat(Number(arg('body-chars', 2000))),
+                input: requestInput,
                 stream: true,
               }),
               signal: AbortSignal.timeout(streamMs + 60000),
@@ -135,6 +143,7 @@ try {
       streamMs,
       logMode: arg('log-mode', 'normal'),
       bodyChars: Number(arg('body-chars', 2000)),
+      bodyEntropy: arg('body-entropy', 'low'),
       debugHistory: Number(arg('debug-history', 0)),
       completed,
       failures: failures.length,

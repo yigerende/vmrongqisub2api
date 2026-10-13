@@ -146,11 +146,12 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.url === '/api/panel/request-logs/stats') {
       const since = new Date(Date.now() - 3600_000).toISOString()
+      const bundle = await log.read('statsBundle', { since, bucket: 'minute' })
       return respond({
-        totals: await log.read('totals'),
-        buckets: await log.read('aggregate', { since, bucket: 'minute' }),
-        window: await log.read('windowStats', { since }),
-        config: await log.snapshotAsync(),
+        totals: bundle.totals,
+        buckets: bundle.buckets,
+        window: bundle.window,
+        config: { ...log.snapshot({ count: false }), total_rows: bundle.totalRows },
       })
     }
     if (req.url === '/api/panel/usage-logs') {

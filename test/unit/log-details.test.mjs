@@ -7,7 +7,7 @@ import path from 'node:path'
 import { createDatabase } from '../../src/lib/db/database.mjs'
 import { RequestLogStore } from '../../src/lib/admin/request-log.mjs'
 import { buildDebugRecord } from '../../src/lib/admin/debug-record.mjs'
-import { LogDetails, detailBytes } from '../../src/lib/db/log-details.mjs'
+import { LogDetails, LogDetailsPool, detailBytes } from '../../src/lib/db/log-details.mjs'
 import { encodeDebugJson, decodeDebugJson } from '../../src/lib/db/debug-codec.mjs'
 
 class ControlledWorker extends EventEmitter {
@@ -140,6 +140,80 @@ test('debug flush only waits for the records accepted when called', async (t) =>
   assert.equal(writer.enqueued, 2)
   worker.emit('message', { id: worker.messages[1].id })
   await writer.flush()
+})
+
+test('pipeline replay includes every unacknowledged batch in order', async (t) => {
+  const workers = []
+  const writer = new LogDetails('unused', {
+    retryMs: 1,
+    createWorker: () => {
+      const worker = new ControlledWorker()
+      workers.push(worker)
+      return worker
+    },
+  })
+  t.after(() => writer.close())
+  workers[0].emit('message', { type: 'ready' })
+  for (let i = 0; i < 6; i++) {
+    writer.enqueue({ summary: { request_id: 'same', order: i } })
+    writer.pump()
+  }
+  assert.equal(workers[0].messages.length, 4)
+  workers[0].emit('message', { id: workers[0].messages[0].id })
+  const pending = writer.flush()
+  const rejected = assert.rejects(pending, /exited/)
+  await workers[0].terminate()
+  await rejected
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  workers[1].emit('message', { type: 'ready' })
+  assert.deepEqual(
+    workers[1].messages.flatMap((message) => message.jobs.map((job) => job.summary.order)),
+    [1, 2, 3, 4, 5],
+  )
+  for (const message of workers[1].messages) workers[1].emit('message', { id: message.id })
+  await writer.flush()
+  assert.equal(writer.bytes, 0)
+})
+
+test('parallel detail workers keep every repeated request id on the same writer', async (t) => {
+  const workers = []
+  const pool = new LogDetailsPool('unused', {
+    createWorker: () => {
+      const worker = new ControlledWorker()
+      workers.push(worker)
+      return worker
+    },
+  })
+  t.after(() => pool.close())
+  for (const worker of workers) worker.emit('message', { type: 'ready' })
+  for (let i = 0; i < 60; i++) pool.enqueue({ summary: { request_id: `key-${i % 10}`, order: i } })
+  const flushed = pool.flush()
+  const owners = new Map()
+  for (const [index, worker] of workers.entries()) {
+    for (const message of worker.messages) {
+      for (const { summary } of message.jobs) {
+        const prev = owners.get(summary.request_id)
+        if (prev) {
+          assert.equal(prev.index, index)
+          assert.ok(prev.order < summary.order)
+        }
+        owners.set(summary.request_id, { index, order: summary.order })
+      }
+      worker.emit('message', { id: message.id })
+    }
+  }
+  await flushed
+  assert.equal(new Set([...owners.values()].map((entry) => entry.index)).size, 2)
+  assert.equal(pool.snapshot().persisted_records, 60)
+})
+
+test('retention cannot delete a newer repeated-id record selected by an earlier cleanup step', (t) => {
+  const { store } = fixture(t)
+  store.repo.insertDebug('repeat', '2020-01-01T00:00:00Z', { old: true })
+  const selected = store.repo._oldDebugBatch.all('2021-01-01T00:00:00Z', 8)
+  store.repo.insertDebug('repeat', new Date().toISOString(), { fresh: true })
+  assert.equal(store.repo._deleteDebugChunk(selected).count, 0)
+  assert.equal(store.repo.getDebug('repeat').fresh, true)
 })
 
 test('retention counts UTF-8 bytes via its index and deletes oldest records in bounded steps', async (t) => {

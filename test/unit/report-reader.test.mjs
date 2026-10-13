@@ -39,6 +39,14 @@ test('offloaded reports preserve ownership, muted errors, pagination and billing
   assert.ok(db.prepare("SELECT total_cost FROM usage_logs WHERE request_id = 'request-1'").get().total_cost > 0)
   const window = { since: '2020-01-01T00:00:00Z', until: '2099-01-01T00:00:00Z', owner_user_id: 2 }
   assert.deepEqual(await store.read('windowStats', window), store.windowStats(window))
+  const bundle = await store.read('statsBundle', { ...window, bucket: 'hour', includeTotals: false })
+  assert.equal(bundle.totals, null)
+  assert.equal(bundle.totalRows, null)
+  assert.deepEqual(bundle.buckets, store.aggregate({ ...window, bucket: 'hour' }))
+  assert.deepEqual(bundle.window, store.windowStats(window))
+  const admin = await store.read('statsBundle', window)
+  assert.deepEqual(admin.totals, store.totals())
+  assert.equal(admin.totalRows, store.count())
   const filters = { owner_user_id: 1, limit: 10 }
   assert.deepEqual(
     await store.readView('view', 'listBatch', filters),
