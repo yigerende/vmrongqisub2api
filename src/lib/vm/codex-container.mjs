@@ -22,6 +22,8 @@ const mutations = new Set()
 const runner = fileURLToPath(new URL('./codex-container-runner.py', import.meta.url))
 export { managedCodex }
 const managedKvm = (vm) => vm?.execution_mode === 'kvm_per_slot'
+const KVM_BOOT_TIMEOUT_MS = 10 * 60 * 1000
+const KVM_CONTROL_TIMEOUT_MS = 60 * 1000
 const kvmAssets = fileURLToPath(new URL('../../../docker/kin-kvm/', import.meta.url))
 const key = (root, id) => path.join(root, 'vms', `${id}.json`)
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -241,7 +243,7 @@ export async function startManagedContainer(vm, root, { routing } = {}) {
   // Reconcile a crash after docker run but before the runtime record was saved.
   // A retry of an already active assignment must leave its guest kernel running.
   if (!wasRunning || !vm.runtime?.container_id)
-    await command(root, vm, false, { timeoutMs: managedKvm(vm) ? 300000 : 10000, restart: true })
+    await command(root, vm, false, { timeoutMs: managedKvm(vm) ? KVM_BOOT_TIMEOUT_MS : 10000, restart: true })
   return { ok: true, runtime }
 }
 async function startManagedKvm(vm, root, { image, memory }) {
@@ -316,7 +318,9 @@ export async function ensureManagedKernel(exec, { internal = false } = {}) {
     const credential = path.join(paths(root, id).dir, 'codex-credentials.json')
     if (!fs.existsSync(credential)) throw containerError('no_credential')
     writeManagedConfig(root, vm)
-    await command(root, vm, true)
+    // KVM lifecycle operations allow for guest startup and shared-filesystem lag.
+    // Keep the normal inference path's existing short control wait.
+    await command(root, vm, true, { timeoutMs: internal && managedKvm(vm) ? KVM_CONTROL_TIMEOUT_MS : 10000 })
     for (let i = 0; i < 60; i++) {
       const health = await codexKernelHealth(exec, { timeoutMs: 500 }).catch(() => null)
       if (health?.ok || health?.status === 200) return { ok: true, health, container: info }
@@ -354,7 +358,8 @@ export async function withManagedMaintenance(root, vm, fn, { deleting = false, r
       const info = await inspectManagedContainer(current)
       // DELETE immediately removes the owned container, including active work.
       // It must not add a drain phase or depend on the guest controller replying.
-      if (info?.running && !deleting) await command(root, current, false)
+      if (info?.running && !deleting)
+        await command(root, current, false, { timeoutMs: managedKvm(current) ? KVM_CONTROL_TIMEOUT_MS : 10000 })
       const result = await fn(current, info)
       const saved = getVm(root, vm.id)
       if (restore && !deleting && saved?.status === 'running' && saved.schedulable) {
